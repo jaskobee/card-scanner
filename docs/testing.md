@@ -99,6 +99,21 @@ sent to review for its variant (`CLAUDE.md` §5): a photo cannot show holo from
 normal. And nothing here has touched sleeved cards, slabs, foil glare in the
 real world, or any game but Pokémon.
 
+### The eBay file — `test/ebay.test.mjs` and `test/smoke.mjs`
+
+Unit tests cover the eBay knowledge (categories, the four ungraded conditions,
+graders, grades, and that nothing outside eBay's lists is translated) and a mixed
+batch through the template machinery. The browser test then exports a real mixed
+batch and asserts on **the file a person would upload**: the info line first,
+`Action` leading, each card in its own category, 2750 against 4000, the
+descriptors, leading zeroes in a certificate number, `Format` always written, a
+template's own info lines and unknown columns written back untouched, and that an
+Excel template is explained rather than ignored.
+
+Every eBay header in these tests is **reconstructed from what eBay's pages
+document, not an eBay-issued file**, and the tests say so. Real templates in
+`test-data/ebay-templates/` would replace them.
+
 ## What is missing, and it matters
 
 **There is no labelled set of real photos.** `tools/accuracy.mjs` measures

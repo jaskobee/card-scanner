@@ -15,6 +15,11 @@ import {
   TEXT_SAFE_FIELDS, MISSING,
 } from '../csv.js';
 import { ADVICE } from '../imagequality.js';
+import {
+  CARD_TYPES, UNGRADED_CONDITIONS, GRADERS, GRADES, ACTIONS, FORMATS, DURATIONS,
+  cardTypeOf, isGraded, ebayCardValues, graderId, gradeId, ungradedConditionId,
+  starterTemplate, formatPrice,
+} from '../ebay.js';
 import { rangeIds, pruneSelection, selectionState } from '../selection.js';
 
 // --- application state ----------------------------------------------------
@@ -37,6 +42,11 @@ const app = {
   mapping: {},
   urls: new store.UrlCache(),
   progress: null,
+  // What the user chose for the eBay file. Persisted, so it survives a reload.
+  ebay: {
+    action: 'VerifyAdd', format: 'FixedPrice', duration: 'GTC', mark: '.', bom: true,
+    cardType: '', condition: '', price: '',   // filled in only for cards that have none
+  },
   selected: new Set(),   // card ids ticked in the cards table
   anchorId: null,        // last ticked row: where a shift-click range starts
   confirmDelete: false,  // the bulk bar is asking "are you sure?"
@@ -73,6 +83,7 @@ async function init() {
   }
   app.titleTemplate = (await store.setting('titleTemplate')) ?? DEFAULT_TEMPLATE;
   app.provider.language = (await store.setting('language')) ?? 'en';
+  app.ebay = { ...app.ebay, ...((await store.setting('ebay')) ?? {}) };
   await store.sweepOrphanBlobs().catch(() => {}); // housekeeping must never stop the app starting
   await loadCards();
   render();
@@ -169,6 +180,7 @@ function renderTabs() {
 
 function go(v) {
   app.view = v;
+  app.singleCardId = null; // a card opened on its own is left behind with the screen
   if (v === 'review') app.reviewIndex = 0;
   render();
 }
@@ -679,16 +691,17 @@ function openReviewFor(id) {
   const list = reviewList();
   const i = list.findIndex((c) => c.id === id);
   app.reviewIndex = i >= 0 ? i : 0;
-  if (i < 0) { app.singleCardId = id; }
+  app.singleCardId = i < 0 ? id : null;
   app.view = 'review';
   render();
 }
 
 function viewReview() {
-  const list = app.singleCardId
-    ? app.cards.filter((c) => c.id === app.singleCardId)
-    : reviewList();
-  app.singleCardId = null;
+  // A card opened on its own stays on screen while it is edited. Every edit
+  // re-renders, and forgetting the card here dropped the user onto whatever was
+  // next in the review queue, or "nothing needs your attention".
+  let list = app.singleCardId ? app.cards.filter((c) => c.id === app.singleCardId) : [];
+  if (!list.length) { app.singleCardId = null; list = reviewList(); } // gone, e.g. deleted
 
   if (!list.length) {
     return h('div', { class: 'empty' },
@@ -749,8 +762,12 @@ function viewReview() {
         h('div', { class: 'fieldlist' },
           ...[...COLUMNS, { key: 'manufacturer', label: 'Maker' }, { key: 'language', label: 'Language' }]
             .map((col) => fieldRow(card, col)),
-          conditionRow(card),
         ),
+
+        h('h3', { style: { marginTop: '18px' } }, 'For eBay'),
+        h('p', { class: 'tiny muted', style: { marginTop: 0 } },
+          'You decide these. We never work out a card’s condition from its photo.'),
+        h('div', { class: 'fieldlist' }, ...ebayRows(card)),
 
         card.candidates.length > 1
           ? h('div', {},
@@ -815,22 +832,93 @@ function fieldRow(card, col) {
   );
 }
 
-function conditionRow(card) {
-  // §5: condition is never inferred from an image. The user chooses it.
-  const options = ['', 'Near Mint', 'Excellent', 'Good', 'Played', 'Poor'];
+// --- eBay details on one card -----------------------------------------------
+// Every value here is the user's choice. eBay knows a single card as graded or
+// ungraded, and each kind is described differently, so the rows shown depend on
+// which it is. Cards saved with a condition eBay does not offer for cards (an
+// earlier version offered "Good" and "Played") keep it visible, marked, rather
+// than losing it or quietly turning it into something else.
+
+async function setUser(card, field, value) {
+  Object.assign(card, correct(card, field, value));
+  await store.put('cards', card);
+  render(); renderTabs();
+}
+
+function pickRow(label, options, current, onPick, note = 'you') {
   return h('div', { class: 'fieldrow' },
-    h('span', { class: 'k' }, 'Condition'),
+    h('span', { class: 'k' }, label),
     h('span', { class: 'v' },
-      h('select', {
-        class: 'field', 'aria-label': 'Condition',
-        onChange: async (e) => {
-          Object.assign(card, correct(card, 'condition', e.target.value));
-          await store.put('cards', card);
-        },
-      }, ...options.map((o) => h('option', { value: o, selected: card.user.condition === o }, o || 'Choose…'))),
+      h('select', { class: 'field', 'aria-label': label, onChange: (e) => onPick(e.target.value) },
+        ...options.map(([value, text]) => h('option', { value, selected: value === current }, text))),
     ),
-    h('span', { class: 'src' }, 'you'),
+    h('span', { class: 'src' }, note),
   );
+}
+
+function textRow(label, value, onSave, { placeholder = 'Add', note = 'you' } = {}) {
+  return h('div', { class: 'fieldrow' },
+    h('span', { class: 'k' }, label),
+    h('span', { class: 'v' }, editable(value, onSave, { label, placeholder })),
+    h('span', { class: 'src' }, note),
+  );
+}
+
+/** A stored value that no longer matches any option is shown, marked, instead of vanishing. */
+function withStored(options, stored, resolved) {
+  const s = String(stored ?? '').trim();
+  return s !== '' && resolved == null ? [...options, [s, `${s} (not an eBay option)`]] : options;
+}
+
+function ebayRows(card) {
+  const raw = (f) => valueOf(card, f);
+  const type = cardTypeOf(raw);
+  const graded = isGraded(raw);
+  const said = String(raw('graded') ?? '');
+
+  const rows = [
+    pickRow('Card type', [
+      ['', type && type.from !== 'you' ? `${CARD_TYPES[type.type].label} (from the card)` : 'Choose…'],
+      ...Object.entries(CARD_TYPES).map(([k, t]) => [k, `${t.label} — ${t.hint}`]),
+    ], type?.from === 'you' ? type.type : '', (v) => setUser(card, 'cardType', v)),
+
+    pickRow('Graded', [
+      ['', graded === null ? 'Choose…' : `${graded ? 'Yes' : 'No'} (from the details below)`],
+      ['No', 'No'], ['Yes', 'Yes'],
+    ], /^(yes|no)$/i.test(said) ? said : '', (v) => setUser(card, 'graded', v)),
+  ];
+
+  if (graded === true) {
+    const graderNow = GRADERS.find((g) => g.id === graderId(raw('gradingCompany')))?.name ?? '';
+    const gradeNow = GRADES.find((g) => g.id === gradeId(raw('grade')))?.label ?? '';
+    rows.push(
+      pickRow('Grader', withStored(
+        [['', 'Choose…'], ...GRADERS.map((g) => [g.name, g.short ? `${g.short} — ${g.name}` : g.name])],
+        raw('gradingCompany'), graderNow || null,
+      ), graderNow || String(raw('gradingCompany') ?? ''), (v) => setUser(card, 'gradingCompany', v)),
+      pickRow('Grade', withStored(
+        [['', 'Choose…'], ...GRADES.map((g) => [g.label, g.label])],
+        raw('grade'), gradeNow || null,
+      ), gradeNow || String(raw('grade') ?? ''), (v) => setUser(card, 'grade', v)),
+      textRow('Certificate no.', raw('certNumber'), (v) => setUser(card, 'certNumber', v), { placeholder: 'Optional' }),
+    );
+  } else {
+    const nowId = ungradedConditionId(raw('condition'));
+    const nowLabel = UNGRADED_CONDITIONS.find((c) => c.id === nowId)?.en ?? '';
+    rows.push(pickRow('Condition', withStored(
+      [['', 'Choose…'], ...UNGRADED_CONDITIONS.map((c) => [c.en, `${c.en} (${c.de})`])],
+      raw('condition'), nowLabel || null,
+    ), nowLabel || String(raw('condition') ?? ''), (v) => setUser(card, 'condition', v)));
+  }
+
+  const price = raw('price');
+  const badPrice = price != null && price !== '' && formatPrice(price) === null;
+  rows.push(
+    textRow('Price (EUR)', price, (v) => setUser(card, 'price', v),
+      { placeholder: 'Needs a price', note: badPrice ? 'not a plain amount' : 'you' }),
+    textRow('Quantity', raw('quantity'), (v) => setUser(card, 'quantity', /^\d+$/.test(v) ? Number(v) : v), { placeholder: '1' }),
+  );
+  return rows;
 }
 
 async function applyCandidate(card, c) {
@@ -903,13 +991,72 @@ function wireGlobalKeys() {
 
 // --- export ---------------------------------------------------------------
 
+/**
+ * What a card says, with the batch defaults the user chose filled in only where
+ * the card has nothing of its own. A value set on a card always wins, and a
+ * default condition is never applied to a card that is graded.
+ */
+function ebayGetter(card) {
+  const raw = (f) => valueOf(card, f);
+  const graded = isGraded(raw);
+  const d = app.ebay;
+  return (f) => {
+    const v = raw(f);
+    if (v != null && v !== '') return v;
+    if (f === 'cardType') return d.cardType || null;
+    if (f === 'condition' && graded !== true) return d.condition || null;
+    if (f === 'price') return d.price || null;
+    return null;
+  };
+}
+
+/** What still stops a card being described to eBay correctly, in the user's words. */
+function cardProblems(card) {
+  const get = ebayGetter(card);
+  const { problems } = ebayCardValues(get);
+  const price = get('price');
+  if (price != null && price !== '' && formatPrice(price) === null) problems.push('price (not a plain amount)');
+  return problems;
+}
+
+// Friendly names for the fields a template column can be filled from.
+const FIELD_LABELS = {
+  title: 'Title', description: 'Description', price: 'Price', quantity: 'Quantity', sku: 'SKU',
+  category: 'Category', conditionId: 'Condition ID', condition: 'Condition (written)',
+  cardConditionId: 'Card condition', graderId: 'Grader', gradeId: 'Grade', certificationNumber: 'Certificate number',
+  action: 'Action', format: 'Format', duration: 'Duration',
+  name: 'Card name', number: 'Card number', set: 'Set', year: 'Year', manufacturer: 'Manufacturer',
+  game: 'Game', language: 'Language', variant: 'Variant', grade: 'Grade (written)', gradingCompany: 'Grader (written)',
+};
+
 function cardValue(card, field) {
   if (field === 'title') {
     return renderTitle(app.titleTemplate, Object.fromEntries(
       [...IDENTIFICATION_FIELDS, 'variant', 'condition', 'grade'].map((f) => [f, valueOf(card, f)]),
     )).title;
   }
-  return valueOf(card, field);
+  const get = ebayGetter(card);
+  const ebay = () => ebayCardValues(get);
+  switch (field) {
+    case 'category': return ebay().categoryId;
+    case 'conditionId': return ebay().conditionId;
+    case 'cardConditionId': return ebay().cardCondition;
+    case 'graderId': return ebay().grader;
+    case 'gradeId': return ebay().grade;
+    case 'certificationNumber': return ebay().certNumber;
+    case 'action': return app.ebay.action;
+    case 'format': return app.ebay.format;
+    case 'duration': return app.ebay.duration;
+    case 'price': return formatPrice(get('price'), app.ebay.mark);
+    case 'quantity': return get('quantity') ?? 1;
+    default: return valueOf(card, field);
+  }
+}
+
+async function saveEbay(patch) {
+  app.ebay = { ...app.ebay, ...patch };
+  await store.setting('ebay', app.ebay);
+  render();
 }
 
 function viewExport() {
@@ -939,16 +1086,7 @@ function viewExport() {
       ),
     ),
 
-    h('div', { class: 'panel' },
-      h('h3', {}, 'Your eBay template'),
-      h('p', { class: 'tiny muted' },
-        'eBay’s columns differ by category and by country, so we use the template file from your own Seller Hub rather than guessing a format.'),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn', onClick: () => pickTemplate() }, icon('upload', 14), 'Upload eBay template'),
-        app.template ? h('span', { class: 'tiny muted' }, `${app.template.columnCount} columns detected`) : null,
-      ),
-      app.template ? templateSummary() : null,
-    ),
+    ebayPanel(),
 
     h('div', { class: 'panel' },
       h('h3', {}, 'Download'),
@@ -958,10 +1096,97 @@ function viewExport() {
         app.template
           ? h('button', { class: 'btn primary', onClick: () => exportTemplate() }, icon('download', 14), 'eBay CSV')
           : null,
+        app.template && cardTypeCount() > 1
+          ? h('button', { class: 'btn', onClick: () => exportTemplate({ split: true }) }, icon('download', 14), 'eBay CSV, one file per card type')
+          : null,
       ),
+      app.template
+        ? h('label', { class: 'row', style: { gap: '8px', marginTop: '12px' } },
+            h('input', {
+              type: 'checkbox', checked: app.ebay.bom,
+              onChange: (e) => saveEbay({ bom: e.target.checked }),
+            }),
+            h('span', { class: 'tiny' }, 'Mark the file as UTF-8 (needed so German characters survive in Excel). Turn this off if eBay rejects the first line.'))
+        : null,
       h('p', { class: 'tiny muted', style: { marginTop: '10px', marginBottom: 0 } },
-        'Files are written as UTF-8 with a byte-order mark, so German characters survive in Excel. Card numbers such as 004/120 are quoted as text so they are not turned into dates.'),
+        'Files are UTF-8. Card numbers such as 004/120 are quoted as text so they are not turned into dates.'),
     ),
+  );
+}
+
+/** How many kinds of card the batch holds, so a one-file-per-kind export can be offered. */
+function cardTypeCount() {
+  return new Set(app.cards.map((c) => ebayCardValues(ebayGetter(c)).categoryId ?? 'none')).size;
+}
+
+function ebayPanel() {
+  const t = app.template;
+  return h('div', { class: 'panel' },
+    h('h3', {}, 'eBay file'),
+    h('p', { class: 'tiny muted' },
+      'eBay only accepts files laid out exactly like its own template, and it changes them. The most reliable result comes from your own template: we fill it in and leave every column we do not know exactly as it was.'),
+
+    h('details', { style: { marginBottom: '12px' } },
+      h('summary', { class: 'tiny', style: { cursor: 'pointer' } }, 'How to get your template from eBay'),
+      h('ol', { class: 'tiny', style: { margin: '8px 0 0', paddingLeft: '18px' } },
+        h('li', {}, 'In Seller Hub (Verkäufer-Cockpit Pro) open Reports → Uploads (Berichte → Hochladen), then Get template (Vorlage abrufen).'),
+        h('li', {}, 'Choose the template for new listings, or for drafts if you will add the photos on eBay afterwards. The file cannot carry photos, only web addresses.'),
+        h('li', {}, 'Pick the categories you list in. For single cards: Sammelkartenspiele › CCG Einzelkarten, Sport Trading Cards › Trading Card Einzelkarten, Non-Sport Trading Cards › Trading Card Einzelkarten.'),
+        h('li', {}, 'Download it as .csv rather than Excel, then upload it here.'),
+      ),
+    ),
+
+    h('div', { class: 'row' },
+      h('button', { class: `btn ${t && !t.starter ? '' : 'primary'}`, onClick: () => pickTemplate() }, icon('upload', 14), 'Upload eBay template'),
+      h('button', { class: 'btn', onClick: () => useStarter() }, 'Use a starter instead'),
+      t?.starter
+        ? h('button', { class: 'btn ghost', onClick: () => downloadStarter() }, icon('download', 14), 'Download the blank starter')
+        : null,
+      t ? h('span', { class: 'tiny muted' }, `${t.starter ? 'Starter' : 'Your template'}: ${t.columnCount} columns`) : null,
+    ),
+
+    t?.starter
+      ? h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+          h('strong', {}, 'This starter is not from eBay. '),
+          'It uses only column names that eBay’s own help pages give, for draft listings, and leaves out the item specifics because their German names could not be confirmed. eBay may still reject it. Try one card first with “Check only”, and if it fails, upload your own template instead.')
+      : null,
+
+    t ? listingDetails() : null,
+    t ? templateSummary() : null,
+  );
+}
+
+function listingDetails() {
+  const d = app.ebay;
+  const pick = (label, key, options) => h('div', {},
+    h('label', { class: 'lbl' }, label),
+    h('select', {
+      class: 'field', 'aria-label': label,
+      onChange: (e) => saveEbay({ [key]: e.target.value }),
+    }, ...options.map(([v, text]) => h('option', { value: v, selected: v === d[key] }, text))));
+
+  return h('div', { style: { marginTop: '18px' } },
+    h('h3', {}, 'Listing details'),
+    h('p', { class: 'tiny muted', style: { marginTop: 0 } },
+      'Used only for cards that have nothing of their own. Whatever you set on a card always wins, and a default condition is never applied to a graded card.'),
+    h('div', { class: 'formgrid' },
+      pick('Card type', 'cardType', [['', 'None, I will choose per card'], ...Object.entries(CARD_TYPES).map(([k, t]) => [k, t.label])]),
+      pick('Condition (ungraded cards)', 'condition', [['', 'None, I will choose per card'], ...UNGRADED_CONDITIONS.map((c) => [c.en, `${c.en} (${c.de})`])]),
+      h('div', {},
+        h('label', { class: 'lbl', for: 'default-price' }, 'Price (EUR)'),
+        h('input', {
+          id: 'default-price', class: 'field', value: d.price, placeholder: 'For cards without a price',
+          onChange: (e) => saveEbay({ price: e.target.value.trim() }),
+        })),
+      pick('What eBay should do with the file', 'action', ACTIONS.map((a) => [a.value, a.label])),
+      pick('Format', 'format', FORMATS.map((f) => [f.value, f.label])),
+      pick('Duration', 'duration', DURATIONS.map((x) => [x.value, x.label])),
+      pick('Decimal mark in prices', 'mark', [['.', '12.50'], [',', '12,50']]),
+    ),
+    d.format === 'Auction' && d.duration === 'GTC'
+      ? h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+          'An auction has to run for a number of days. “Until cancelled” only works for fixed-price listings.')
+      : null,
   );
 }
 
@@ -982,7 +1207,7 @@ function templateSummary() {
     h('h3', { style: { marginTop: '14px' } }, 'Field mapping'),
     ...Object.entries(app.mapping).map(([field, header]) =>
       h('div', { class: 'maprow' },
-        h('span', {}, field),
+        h('span', {}, FIELD_LABELS[field] ?? field),
         h('span', { class: 'arrow' }, '→'),
         h('select', {
           class: 'field', 'aria-label': `Map ${field} to a column`,
@@ -1016,7 +1241,27 @@ function templateSummary() {
             ))),
           h('p', { class: 'tiny', style: { marginTop: '8px', marginBottom: 0 } },
             'We mark these rather than guess them. Fill them in on the card, or export anyway and finish in eBay.')),
+
+    v.warnings?.length
+      ? h('div', { class: 'notice', style: { marginTop: '12px' } },
+          h('strong', {}, 'Not needed for a draft, but needed before it can be published: '),
+          h('span', { class: 'tiny' }, v.warnings.map((w) => `${w.header.replace(/\*/g, '')} (${w.indexes.length})`).join(' · ')))
+      : null,
+
+    stillToDecide(),
   );
+}
+
+/** Cards that eBay cannot be told about correctly yet, grouped by what is missing. */
+function stillToDecide() {
+  const counts = new Map();
+  for (const c of app.cards) for (const p of cardProblems(c)) counts.set(p, (counts.get(p) ?? 0) + 1);
+  if (!counts.size) return null;
+  return h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+    h('strong', {}, 'Still to decide on some cards: '),
+    h('span', { class: 'tiny' }, [...counts].map(([p, n]) => `${p} (${n})`).join(' · ')),
+    h('p', { class: 'tiny', style: { margin: '6px 0 0' } },
+      'Open a card and choose these under “For eBay”, or set a default above. Nothing is filled in for you: a wrong condition or category misdescribes the card to a buyer.'));
 }
 
 async function pickTemplate() {
@@ -1026,6 +1271,10 @@ async function pickTemplate() {
     const file = input.files[0];
     input.remove();
     if (!file) return;
+    if (/\.xlsx?$/i.test(file.name)) {
+      toast('That is an Excel file. In Seller Hub, download the template as .csv instead.');
+      return;
+    }
     try {
       const text = await file.text();
       app.template = parseTemplate(text);
@@ -1066,17 +1315,54 @@ function exportJson() {
   toast('Exported JSON');
 }
 
-function exportTemplate() {
-  const rows = buildTemplateRows(app.cards, app.template, app.mapping, cardValue);
-  const v = validateRows(rows, app.template);
-  if (!v.ok && !confirm(`${v.total - v.complete} listings are missing a required field and will say "${MISSING}". Export anyway?`)) return;
+function useStarter() {
+  app.template = starterTemplate();
+  app.mapping = suggestMapping(app.template.headers).mapping;
+  render();
+  toast('Starter loaded. It is not an eBay file, so try one card first.');
+}
 
+function downloadStarter() {
+  const t = starterTemplate();
+  download('ebay-starter-template.csv', toCsv(t.headers, [], { preamble: t.preamble, bom: app.ebay.bom }));
+}
+
+/** Write one eBay file for these cards, keeping the template's own info lines above the header. */
+function writeEbayFile(cards, filename) {
+  const rows = buildTemplateRows(cards, app.template, app.mapping, cardValue);
   const csv = toCsv(app.template.headers, rows, {
     delimiter: app.template.delimiter,
+    preamble: app.template.preamble,
+    bom: app.ebay.bom,
     textColumns: app.template.headers.filter((hh) => /number|sku|label|serial|cert/i.test(hh)),
   });
-  download(`${slug(app.project.name)}-ebay.csv`, csv);
-  toast(`Exported ${rows.length} listings`);
+  download(filename, csv);
+  return rows;
+}
+
+function exportTemplate({ split = false } = {}) {
+  const all = buildTemplateRows(app.cards, app.template, app.mapping, cardValue);
+  const v = validateRows(all, app.template);
+  if (!v.ok && !confirm(`${v.total - v.complete} listings are missing a required field and will say "${MISSING}". Export anyway?`)) return;
+
+  if (!split) {
+    writeEbayFile(app.cards, `${slug(app.project.name)}-ebay.csv`);
+    toast(`Exported ${app.cards.length} listings`);
+    return;
+  }
+
+  // One file per kind of card, in case eBay refuses a file that mixes categories.
+  const groups = new Map();
+  for (const c of app.cards) {
+    const id = ebayCardValues(ebayGetter(c)).categoryId;
+    const key = Object.entries(CARD_TYPES).find(([, t]) => t.id === id)?.[0] ?? 'no-card-type';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  [...groups].forEach(([key, cards], i) => {
+    setTimeout(() => writeEbayFile(cards, `${slug(app.project.name)}-ebay-${key}.csv`), i * 400);
+  });
+  toast(`Exported ${groups.size} files`);
 }
 
 function slug(s) {

@@ -1,6 +1,8 @@
 // CSV / template export. See CLAUDE.md §6.
 // Two rules govern this file: never invent a value, never silently alter one.
 
+import { descriptorField } from './ebay.js';
+
 // Spreadsheet apps execute a cell that begins with any of these.
 const FORMULA_PREFIX = /^[=+\-@\t\r]/;
 
@@ -42,14 +44,17 @@ export function escapeField(value, delimiter = ',', opts = {}) {
  * Build a CSV document.
  * @param {string[]} headers
  * @param {Array<Record<string,*>>} rows
- * @param {{delimiter?: string, bom?: boolean, eol?: string, textColumns?: string[]}} [opts]
+ * @param {{delimiter?: string, bom?: boolean, eol?: string, textColumns?: string[], preamble?: string[][]}} [opts]
+ *   `preamble` is rows written above the header exactly as a template had them
+ *   (eBay's `#INFO` line names the template type and is required).
  */
 export function toCsv(headers, rows, opts = {}) {
   const delimiter = opts.delimiter ?? ',';
   const eol = opts.eol ?? '\r\n'; // RFC 4180; Excel on every platform accepts it
   const textColumns = new Set(opts.textColumns ?? []);
 
-  const lines = [headers.map((h) => escapeField(h, delimiter)).join(delimiter)];
+  const lines = (opts.preamble ?? []).map((cells) => cells.map((c) => escapeField(c, delimiter)).join(delimiter));
+  lines.push(headers.map((h) => escapeField(h, delimiter)).join(delimiter));
   for (const row of rows) {
     lines.push(
       headers
@@ -186,8 +191,14 @@ export const SUGGESTED_MAPPING = {
   price: ['price', 'preis', 'startpreis', 'start price', 'buy it now price', 'sofort kaufen preis'],
   quantity: ['quantity', 'menge', 'anzahl'],
   sku: ['custom label', 'custom label sku', 'sku', 'artikelnummer'],
-  condition: ['condition', 'zustand', 'condition id'],
+  // eBay's numeric Condition ID (2750 graded, 4000 ungraded) is not the same
+  // thing as a card's written condition, so they are separate fields.
+  conditionId: ['condition id', 'conditionid', 'zustand id'],
+  condition: ['condition', 'zustand'],
   category: ['category', 'kategorie', 'category id', 'primary category'],
+  action: ['action', 'aktion'],
+  format: ['format', 'listing format', 'angebotsformat'],
+  duration: ['duration', 'listing duration', 'angebotsdauer', 'laufzeit'],
   name: ['character', 'player', 'spieler', 'card name', 'kartenname'],
   number: ['card number', 'kartennummer', 'number'],
   set: ['set', 'serie', 'card set', 'kartenserie'],
@@ -208,6 +219,14 @@ export const SUGGESTED_MAPPING = {
 export function suggestMapping(headers) {
   const mapping = {};
   const taken = new Set();
+
+  // Card-condition and grading columns name their eBay descriptor ID in the
+  // header, which is the same in every language, so those are read first.
+  for (const h of headers) {
+    const field = descriptorField(h);
+    if (field && !(field in mapping)) { mapping[field] = h; taken.add(h); }
+  }
+
   for (const [field, aliases] of Object.entries(SUGGESTED_MAPPING)) {
     const hit = headers.find(
       (h) => !taken.has(h) && aliases.includes(normalizeHeader(h)),
@@ -227,6 +246,9 @@ export function suggestMapping(headers) {
  */
 export function buildTemplateRows(cards, template, mapping, getValue) {
   const inverse = new Map(Object.entries(mapping).map(([field, header]) => [header, field]));
+  // The template says which columns are required. For one parsed from a file that
+  // is the asterisk convention; a built-in template lists them outright.
+  const required = new Set(template.required ?? template.headers.filter(isRequiredHeader));
   return cards.map((card) => {
     const row = {};
     for (const header of template.headers) {
@@ -234,31 +256,42 @@ export function buildTemplateRows(cards, template, mapping, getValue) {
       if (!field) { row[header] = ''; continue; } // preserved, never invented
       const v = getValue(card, field);
       row[header] = v === null || v === undefined || v === ''
-        ? (isRequiredHeader(header) ? MISSING : '')
+        ? (required.has(header) ? MISSING : '')
         : v;
     }
     return row;
   });
 }
 
-/** Pre-export validation. Blocks on required fields with no value. §6 */
+/**
+ * Pre-export validation. Blocks on required fields with no value (§6).
+ * Columns a template lists as `recommended` do not block: they are reported as
+ * warnings, because a draft can be created without them but not published.
+ */
 export function validateRows(rows, template) {
-  const issues = new Map(); // header -> row indexes
-  rows.forEach((row, i) => {
-    for (const header of template.required) {
-      const v = row[header];
-      if (v === '' || v === null || v === undefined || v === MISSING) {
-        if (!issues.has(header)) issues.set(header, []);
-        issues.get(header).push(i);
+  const blank = (v) => v === '' || v === null || v === undefined || v === MISSING;
+  const collect = (headers) => {
+    const found = new Map(); // header -> row indexes
+    rows.forEach((row, i) => {
+      for (const header of headers) {
+        if (blank(row[header])) {
+          if (!found.has(header)) found.set(header, []);
+          found.get(header).push(i);
+        }
       }
-    }
-  });
+    });
+    return found;
+  };
+  const issues = collect(template.required);
+  const warnings = collect(template.recommended ?? []);
   const affected = new Set([...issues.values()].flat());
+  const list = (m) => [...m.entries()].map(([header, indexes]) => ({ header, indexes }));
   return {
     ok: issues.size === 0,
     total: rows.length,
     complete: rows.length - affected.size,
-    issues: [...issues.entries()].map(([header, indexes]) => ({ header, indexes })),
+    issues: list(issues),
+    warnings: list(warnings),
   };
 }
 

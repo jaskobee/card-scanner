@@ -2,6 +2,7 @@
 // Run with: node test/smoke.mjs   (requires the dev server on :8080)
 
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 // Resolve Playwright from wherever it is installed (local, global, or a path
 // given by PLAYWRIGHT_PATH) so the smoke test needs no install of its own.
@@ -322,6 +323,127 @@ const swept = await page.evaluate(async (ids) => {
 log(!swept.legacy && !swept.old, 'orphaned photos from before this fix are swept away');
 log(swept.recent, 'a photo saved moments ago is never swept');
 log(JSON.stringify(swept.liveKept) === '[2,0,0,2]', 'photos belonging to existing cards are untouched', JSON.stringify(swept.liveKept));
+
+// --- the eBay file, end to end, in a real browser ---------------------------------
+// A mixed batch goes through the starter template and through a template shaped
+// like the ones eBay issues. What is asserted is the file a person would upload.
+
+await page.evaluate(async () => {
+  const store = await import('/src/storage.js');
+  const { newCard, extracted } = await import('/src/model.js');
+  const [project] = await store.all('projects');
+  // Earlier checks leave cards behind in this browser's storage. Start empty.
+  await store.removeCards((await store.all('cards')).map((c) => c.id));
+  const base = Date.now();
+  const mk = (i, fields, user = {}) => {
+    const c = newCard({ projectId: project.id });
+    c.createdAt = base + i;
+    for (const [k, v] of Object.entries(fields)) c.fields[k] = extracted(v, 'ocr', 0.9);
+    Object.assign(c.user, user);
+    return c;
+  };
+  for (const c of [
+    mk(0, { name: 'Charizard', number: '4/102', set: 'Base Set', year: 1999, game: 'Pokémon' }, { condition: 'Near mint or better', price: '45' }),
+    mk(1, { name: 'Mike Trout', number: '1', set: 'Topps Chrome', year: 2011 }, { cardType: 'sports', gradingCompany: 'PSA', grade: '10', certNumber: '00987654', price: '120,5' }),
+    mk(2, { name: 'Brad Pitt', set: 'Celebrity Cards', year: 2003 }, { cardType: 'nonsport', condition: 'Sehr gut' }),
+    mk(3, { name: 'Mystery card' }, { condition: 'Played' }),
+  ]) await store.put('cards', c);
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.locator('#tabs button', { hasText: 'Export' }).click();
+await page.locator('button', { hasText: 'Use a starter instead' }).click();
+
+log(/not from eBay/i.test(await page.locator('.notice.warn').first().innerText()), 'the starter says plainly that it is not an eBay file');
+const needs = await page.locator('.notice.warn', { hasText: 'Still to decide' }).innerText();
+log(/card type \(1\)/.test(needs) && /condition \(not one eBay lists for cards\) \(1\)/.test(needs), 'what is still undecided is named, in words', needs.split('\n')[0]);
+
+const download = async (click) => {
+  page.once('dialog', (d) => d.accept()); // "export anyway": one card has no card type
+  const [dl] = await Promise.all([page.waitForEvent('download'), click()]);
+  return { text: readFileSync(await dl.path(), 'utf8'), name: dl.suggestedFilename() };
+};
+const parse = (text) => {
+  const lines = text.replace(/^﻿/, '').split('\r\n').filter(Boolean);
+  const header = lines.find((l) => l.startsWith('Action('))?.split(',') ?? [];
+  const at = lines.findIndex((l) => l.startsWith('Action('));
+  const col = (n) => lines.slice(at + 1).map((l) => l.split(',')[header.indexOf(n)]);
+  return { lines, header, at, col };
+};
+
+const ebay = await download(() => page.locator('button', { hasText: /^eBay CSV$/ }).click());
+const f = parse(ebay.text);
+log(ebay.text.startsWith('﻿#INFO'), 'eBay\'s info line is the first line, after the UTF-8 mark');
+log(f.header[0].startsWith('Action(SiteID=Germany'), 'Action is the first column');
+log(JSON.stringify(f.col('Category ID')) === '["183454","261328","183050","Needs review"]',
+  'each card is filed in its own category, and the one with none says so', JSON.stringify(f.col('Category ID')));
+log(JSON.stringify(f.col('Condition ID')) === '["4000","2750","4000","4000"]', 'graded is 2750 and ungraded 4000', JSON.stringify(f.col('Condition ID')));
+log(JSON.stringify(f.col('CD:Card Condition - (ID: 40001)')) === '["400010","","400012",""]',
+  'an ungraded condition is its eBay descriptor, and a condition eBay lacks is left empty', JSON.stringify(f.col('CD:Card Condition - (ID: 40001)')));
+log(f.col('CD:Professional Grader - (ID: 27501)')[1] === '275010' && f.col('CD:Grade - (ID: 27502)')[1] === '275020', 'a graded card carries grader and grade');
+log(f.col('CDA:Certification Number - (ID: 27503)')[1] === '"00987654"', 'the certificate number keeps its leading zeroes');
+log(JSON.stringify(f.col('Start price')) === '["45","120.50","",""]', 'prices are plain amounts, or empty', JSON.stringify(f.col('Start price')));
+log(f.col('Format').every((v) => v === 'FixedPrice'), 'Format is always written, because eBay defaults it to Auction');
+log(f.col(f.header[0]).every((v) => v === 'VerifyAdd'), 'the first upload is a check, not a live listing');
+log(f.col('Title').every((t) => t.length <= 80), 'titles stay within eBay\'s 80 characters');
+
+// The mark can be left off, in case eBay objects to it on the first line.
+await page.locator('label', { hasText: 'Mark the file as UTF-8' }).locator('input').uncheck();
+const plain = await download(() => page.locator('button', { hasText: /^eBay CSV$/ }).click());
+log(plain.text.startsWith('#INFO'), 'without the mark the file starts with the info line');
+await page.locator('label', { hasText: 'Mark the file as UTF-8' }).locator('input').check();
+
+const blank = readFileSync(await (await Promise.all([
+  page.waitForEvent('download'), page.locator('button', { hasText: 'Download the blank starter' }).click(),
+]))[0].path(), 'utf8').replace(/^﻿/, '').split('\r\n').filter(Boolean);
+log(blank.length === 2 && blank[0].startsWith('#INFO'), 'the blank starter is the info line and the header, nothing else', String(blank.length));
+
+// One file per kind of card, for when eBay refuses a mixed file.
+const names = [];
+page.on('download', (d) => names.push(d.suggestedFilename()));
+page.once('dialog', (d) => d.accept());
+await page.locator('button', { hasText: 'one file per card type' }).click();
+await page.waitForTimeout(2200);
+log(['ccg', 'sports', 'nonsport', 'no-card-type'].every((k) => names.some((n) => n.includes(`-ebay-${k}`))),
+  'one file per kind of card, and one for cards with no kind', names.join(', '));
+
+// A template shaped like eBay's: info lines above the header, and a column we do not know.
+const template = [
+  '#INFO,Version=1.0.0,Template=fx_category_template_EBAY_DE,,,,',
+  '#INFO,Action and Category ID are required,,,,,',
+  'Action(SiteID=Germany|Country=DE|Currency=EUR|Version=1193|CC=UTF-8),Category ID,Title,Condition ID,C:Game,C:Zzz Unknown Column',
+].join('\r\n') + '\r\n';
+const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.locator('button', { hasText: 'Upload eBay template' }).click()]);
+await chooser.setFiles({ name: 'template.csv', mimeType: 'text/csv', buffer: Buffer.from(template) });
+await page.waitForSelector('text=Your template: 6 columns');
+const own = await download(() => page.locator('button', { hasText: /^eBay CSV$/ }).click());
+const o = own.text.replace(/^﻿/, '').split('\r\n');
+log(o[0] === '#INFO,Version=1.0.0,Template=fx_category_template_EBAY_DE,,,,' && o[1].startsWith('#INFO,Action and Category'),
+  'a template\'s own info lines are written back exactly as they came', o[0]);
+const oc = parse(own.text);
+log(oc.col('C:Zzz Unknown Column').every((v) => v === ''), 'a column we do not know is preserved, and left empty rather than invented');
+log(oc.col('C:Game')[0] === 'Pokémon', 'a column we do recognise is filled from the card');
+
+// eBay's default download is Excel, which is not read yet: say what to do.
+const [xl] = await Promise.all([page.waitForEvent('filechooser'), page.locator('button', { hasText: 'Upload eBay template' }).click()]);
+await xl.setFiles({ name: 'template.xlsx', mimeType: 'application/vnd.ms-excel', buffer: Buffer.from('x') });
+await page.waitForSelector('#toast.show');
+log(/download the template as \.csv/i.test(await page.locator('#toast').innerText()), 'an Excel template is explained, not silently ignored');
+
+// On a card: choose what eBay needs to know, and it is remembered.
+await page.locator('#tabs button', { hasText: 'Cards' }).click();
+await page.locator('tbody tr', { hasText: 'Mystery card' }).locator('button[aria-label="Open this card"]').click();
+await page.waitForSelector('.review');
+await page.locator('select[aria-label="Card type"]').selectOption('nonsport');
+await page.waitForTimeout(250);
+log(await page.locator('.review').count() === 1, 'editing a card opened from the table keeps it on screen, not the review queue');
+await page.waitForTimeout(250);
+const stored = await page.evaluate(async () => {
+  const store = await import('/src/storage.js');
+  return (await store.all('cards')).find((c) => c.fields.name.value === 'Mystery card')?.user.cardType;
+});
+log(stored === 'nonsport', 'a card type chosen on a card is saved', String(stored));
+log(await page.locator('select[aria-label="Condition"] option[value="Played"]').count() === 1,
+  'a condition eBay does not offer stays visible, marked, instead of vanishing');
 
 log(consoleErrors.length === 0, 'no console errors after navigating every view', consoleErrors.join(' | '));
 
