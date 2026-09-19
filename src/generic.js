@@ -48,31 +48,56 @@ async function readStrip(card, ocr, region, targetHeight, invert, psm = 11) {
   return { words, symbols: t.symbols, scale: r.scale, text: t.text, confidence: t.confidence };
 }
 
+// How tall the capitals are when a line is read again. Tesseract reads best when they
+// stand roughly 30 to 70 pixels tall, but photographs and scans differ: a blurred photo of
+// a card reads better enlarged to about 100, while a real scan's clean 35-pixel "BRAY
+// WYATT" read 92 percent sure at its own size and as "sway war" when enlarged. So two
+// sizes are always read and compared, and two more only when neither convinced.
+const FIRST_SIZES = [45, 100];
+const OTHER_SIZES = [30, 70];
+const CONVINCING = 0.85;
+
 /**
- * Read one line again, on its own, in both polarities, both close up and along the
- * whole row. Returns every reading; pickReading decides which to trust.
+ * Read one line again, on its own, in both polarities and at several sizes. Returns
+ * every reading; pickReading decides which to trust. This is also what tells a name
+ * from a pattern that looks like lettering: a name reads 85 to 95 percent sure when
+ * read by itself, and stripes, logos and artwork stay under 50.
  */
 export async function rereadLine(card, ocr, line) {
   const pad = line.height * 0.45;
   const top = Math.max(0, line.y0 - pad), bottom = Math.min(card.height, line.y1 + pad);
-  // Tesseract reads single lines best when the letters are about a hundred pixels tall.
-  const targetHeight = Math.max(80, Math.min(400, Math.round(((bottom - top) / line.height) * 100)));
+  const heightFor = (letters) => Math.max(40, Math.min(400, Math.round(((bottom - top) / line.height) * letters)));
 
-  // Read the piece that was found and, separately, the whole row it sits in: the
-  // piece may be only half a name ("ELLIS," with "JORDAN" lost beside it).
+  // The piece that was found, and the whole row it sits in: the piece may be only
+  // half a name ("ELLIS," with "JORDAN" lost beside it).
   const near = { x: Math.max(0, line.x0 - pad * 2) / card.width, y: top / card.height, w: Math.min(card.width, line.x1 - line.x0 + pad * 4) / card.width, h: (bottom - top) / card.height };
   const row = { x: 0.03, y: top / card.height, w: 0.94, h: (bottom - top) / card.height };
-  const tries = (await Promise.all([near, row].flatMap((region) =>
-    [false, true].map((invert) => readStrip(card, ocr, region, targetHeight, invert, 7))))).flat();
 
-  // Every reading, with word spaces put back by the gaps between the letters.
-  return tries.map((t) => {
-    const heights = t.symbols.filter((sy) => sy.bbox).map((sy) => sy.bbox.y1 - sy.bbox.y0);
-    const spaced = spaceByGaps(t.symbols, median(heights) || 1);
-    // Trust the gap-spaced text only if it is the same letters Tesseract read.
-    const text = tidyName(lettersOf(spaced) === lettersOf(t.text) ? spaced : t.text.replace(/\s+/g, ' ').trim());
-    return { text, confidence: t.confidence };
-  }).filter((r) => r.text);
+  const read = async (region, sizes) => (await Promise.all(sizes.flatMap((letters) =>
+    [false, true].map((invert) => readStrip(card, ocr, region, heightFor(letters), invert, 7)))))
+    .map(asReading).filter(Boolean);
+  // A reading that is sure of itself.
+  const convincing = (rs) => rs.some((r) => r.confidence >= CONVINCING && nameLikeness(r.text) > 0);
+
+  // The piece and the whole row are always both read. Half a name reads convincingly on
+  // its own ("MARINO" of "SOFIA MARINO", "ENA OKA" of "LENA OKAFOR"), and nothing about
+  // the reading says the crop cut it short, so there is no reading that lets the row be skipped.
+  const [piece, whole] = await Promise.all([read(near, FIRST_SIZES), read(row, FIRST_SIZES)]);
+  const readings = [...piece, ...whole];
+  if (!convincing(readings)) readings.push(...await read(near, OTHER_SIZES));
+  return readings;
+}
+
+/** One reading of a line: word spaces put back by the gaps between the letters, where that is safe. */
+function asReading(t) {
+  const heights = t.symbols.filter((sy) => sy.bbox).map((sy) => sy.bbox.y1 - sy.bbox.y0);
+  const spaced = spaceByGaps(t.symbols, median(heights) || 1);
+  // Gaps are only trusted for capitals, which is what runs together when set tight. In
+  // ordinary type Tesseract's own spacing is sound and a gap inside a word is only a gap.
+  const capitals = /[A-Z]/.test(t.text) && t.text === t.text.toUpperCase();
+  const sameLetters = lettersOf(spaced) === lettersOf(t.text);
+  const text = tidyName(capitals && sameLetters ? spaced : t.text.replace(/\s+/g, ' ').trim());
+  return text ? { text, confidence: t.confidence } : null;
 }
 
 /** The first pass: every line of text found anywhere on the card, before any is read again. */
@@ -97,29 +122,36 @@ export async function readAnyCard(card, ocr) {
   if (!rankNames(groupIntoLines(dedupeWords(words)), H).length) words = [...words, ...(await findLines(card, ocr, { fine: true }))];
   const lines = groupIntoLines(dedupeWords(words));
 
-  // Read the likeliest names again, one line at a time.
-  const candidates = rankNames(lines, H).slice(0, 4);
+  // Read the likeliest names again, one line at a time, all at once: the workers are
+  // shared, so this only queues them and the slow lines do not hold the quick ones up.
+  const candidates = rankNames(lines, H).slice(0, 5);
   const refined = new Map();
-  for (const c of candidates) {
-    const line = c.line;
-    if (line.joined || refined.has(line)) continue;
-    refined.set(line, await rereadLine(card, ocr, line));
-  }
+  await Promise.all(candidates.filter((c) => !c.line.joined).map(async (c) => {
+    refined.set(c.line, await rereadLine(card, ocr, c.line));
+  }));
   const sharper = lines.map((l) => {
     const readings = refined.get(l);
     return readings ? { ...l, ...pickReading({ text: l.text, confidence: l.confidence }, readings) } : l;
   });
 
-  const names = rankNames(sharper, H).slice(0, 4).map((n) => ({
+  const ranked = rankNames(sharper, H).slice(0, 4);
+  const names = ranked.map((n) => ({
     text: n.text, confidence: n.confidence, size: n.height / H, score: n.score,
   }));
 
+  // A re-read is tidied to be a name: brand words, digits and marks are trimmed off its
+  // ends. That is right for a name and ruinous for anything else, so a line that only
+  // *looked* like a name ("© 2021 PANINI AMERICA, INC." became "AMERICA INC.") must still
+  // give its year and maker from what was actually printed. Evidence reads the first pass.
+  const named = new Set(ranked.map((n) => n.line));
   return {
     lines: sharper,
     names,
-    evidence: readEvidence(sharper),
-    // Every line worth showing, biggest first, for the user to assign by hand.
+    evidence: readEvidence(lines),
+    // Every line worth showing, biggest first, for the user to assign by hand. The lines
+    // that became names show their corrected reading; the rest show what was printed.
     texts: sharper
+      .map((l, i) => (named.has(l) ? l : lines[i]))
       .filter((l) => /[A-Za-z0-9]{2,}/.test(l.text) && l.confidence >= 0.4)
       .sort((a, b) => b.height - a.height)
       .slice(0, 24)
