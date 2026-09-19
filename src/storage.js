@@ -98,6 +98,7 @@ export async function getBlob(id) { return (await get('blobs', id))?.blob ?? nul
 export class UrlCache {
   constructor() { this.urls = new Map(); }
   async urlFor(id) {
+    if (!id) return null; // a card entered by hand has no photo, and asking storage for "no key" throws
     if (this.urls.has(id)) return this.urls.get(id);
     const blob = await getBlob(id);
     if (!blob) return null;
