@@ -8,3 +8,7 @@ test-results/
 
 # Card images fetched by tools/accuracy.mjs. Not committed: they belong to their publishers.
 test-data/cards/pokemon/.cache/
+
+# Your own card photos, for tools/scan-photos.mjs. Never committed.
+test-data/local/*
+!test-data/local/README.md
