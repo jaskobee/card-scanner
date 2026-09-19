@@ -5,3 +5,6 @@ dist/
 .env
 .env.local
 test-results/
+
+# Card images fetched by tools/accuracy.mjs. Not committed: they belong to their publishers.
+test-data/cards/pokemon/.cache/

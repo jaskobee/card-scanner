@@ -155,6 +155,61 @@ log(pipeline.conditionValue === null, 'condition is left for the user, never inf
 log(pipeline.hasThumb, 'a thumbnail is stored so originals can be released');
 log(pipeline.state === 'NEEDS_REVIEW', 'a flagged card routes to review rather than auto-accepting', pipeline.state);
 
+// --- how the number is read, with OCR stubbed -----------------------------------
+// Black-bordered cards print the number in white, which a normal reading loses.
+// The corners are read again inverted, but only when a normal reading finds no
+// valid number, so ordinary cards never pay for it and never risk it.
+
+const retry = await page.evaluate(async () => {
+  const { processImage } = await import('/src/pipeline.js');
+  const { valueOf } = await import('/src/model.js');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 600; canvas.height = 840;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#222'; ctx.fillRect(0, 0, 600, 840);
+  ctx.fillStyle = '#f4f0e4'; ctx.fillRect(40, 40, 520, 760);
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  const file = new File([blob], 'card.png', { type: 'image/png' });
+
+  const record = { id: 'base1-4', name: 'Charizard', number: '4/102', set: 'Base Set', year: 1999, hp: 120, language: 'en' };
+  const provider = () => ({
+    id: 'stub',
+    knownTotals: async () => new Set([102]),
+    search: async () => [record],
+  });
+
+  // Corner reads are the psm-11 calls. `corner(n)` says what the n-th one returns.
+  const run = async (corner) => {
+    let corners = 0;
+    const ocr = {
+      recognise: async (_img, { psm } = {}) => {
+        if (psm === 11) return { text: corner(corners++), confidence: 0.8, words: [], lines: [] };
+        return { text: 'Charizard 120 HP', confidence: 0.9, words: [], lines: [] };
+      },
+    };
+    const card = await processImage({ file, projectId: 'test', provider: provider(), ocr });
+    return { card, cornerReads: corners, number: valueOf(card, 'number'), year: valueOf(card, 'year') };
+  };
+
+  return {
+    // A good number the first time: no second reading.
+    ordinary: await run(() => '4/102 ★\n© 1999 Wizards'),
+    // Nothing the first time, a number once inverted: the inverted reading is used.
+    whiteOnBlack: await run((n) => (n < 2 ? 'Illus. Someone' : '4/102 ★\n© 1999 Wizards')),
+    // A number whose set size does not exist: not valid, so it is retried, and if
+    // the retry is no better the first reading is kept as read, never repaired.
+    misread: await run(() => '4/999'),
+  };
+});
+
+log(retry.ordinary.cornerReads === 2, 'a valid number the first time means the corners are read once', String(retry.ordinary.cornerReads));
+log(retry.ordinary.number === '4/102', 'the number is what was printed', retry.ordinary.number);
+log(retry.whiteOnBlack.cornerReads === 4, 'no valid number means the corners are read again, inverted', String(retry.whiteOnBlack.cornerReads));
+log(retry.whiteOnBlack.number === '4/102', 'the inverted reading is used when it finds the number', retry.whiteOnBlack.number);
+log(retry.misread.number === '4/999', 'a number that is not valid is reported as read, not repaired', retry.misread.number);
+log(retry.misread.card.state === 'NEEDS_REVIEW', 'and the card goes to review', retry.misread.card.state);
+
 // --- selecting and deleting cards, against real IndexedDB -----------------------
 // Deleting must remove the photos too: they are the full-resolution originals,
 // and leaving them behind would fill the browser's storage invisibly.

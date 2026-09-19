@@ -37,7 +37,10 @@ export function findCardNumbers(text) {
   const out = [];
   const re = /([A-Z]{0,3}\d{1,4}[a-z]?)\s*\/\s*([A-Z]{0,3}\d{1,4})/g;
   let m;
-  const fixed = digitsOnly(text);
+  // A slash is often read as a pipe or backslash. Swap one for one, so the
+  // indices still line up with the original text kept as evidence.
+  const slashed = String(text ?? '').replace(/(?<=[\dOoQDIlSsBZzGT])[|\\](?=[\dOoQDIlSsBZzGT])/g, '/');
+  const fixed = digitsOnly(slashed);
   while ((m = re.exec(fixed)) !== null) {
     const raw = text.slice(m.index, m.index + m[0].length);
     out.push({
@@ -150,4 +153,90 @@ export function lines(text) {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
+}
+
+/**
+ * Hit points. Every Pokémon's HP is a multiple of ten, so a reading that is not
+ * one is a misread, and is dropped rather than passed on as a guess.
+ */
+export function findHp(text) {
+  const t = String(text ?? '');
+  const m = /\b(?:HP|PS|PV|LP)\s*[:.]?\s*(\d{2,3})\b/i.exec(t) ?? /\b(\d{2,3})\s*(?:HP|PS|PV|LP)\b/i.exec(t);
+  if (!m) return null;
+  const hp = Number(m[1]);
+  if (hp < 10 || hp > 340 || hp % 10 !== 0) return null;
+  return { value: hp, raw: m[0] };
+}
+
+// --- card name ---------------------------------------------------------------
+// The name is the hardest thing to pick out of OCR text, because the strip it
+// sits in also holds stage labels, "Evolves from <another Pokémon>", the HP and
+// whatever the artwork's edge looks like to a text reader.
+
+const WORD = /^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*$/;
+// Printed labels that sit beside a name without being part of it.
+const LABEL = /^(?:basic|stage|stufe|grundphase|phase|niveau|pok[eé]mon|trainer|dresseur|hp|ps|pv|lp)$/i;
+// Suffixes that ARE part of the name: "Charizard ex", "Pikachu VMAX".
+const SUFFIX = /^(?:ex|gx|v|vmax|vstar|vunion|break|prime|star)$/i;
+const TITLE = /^(?:mr|dr|jr)\.?$/i;
+const SHORT_NAMES = /^(?:mew|muk|ho-oh)$/i;
+// A line about a different Pokémon. Taking a name from it would be a wrong answer.
+const ABOUT_ANOTHER = /\b(?:evolves?\s+(?:from|de|aus)|put\s+.+\s+on\s+the|entwickelt|[eé]volue)\b/i;
+
+function nameFromLine(line) {
+  const kept = line
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9.'’]+$/g, ''))
+    .filter((t) => WORD.test(t) && !LABEL.test(t)
+      && (t.length >= 4 || SUFFIX.test(t) || TITLE.test(t) || SHORT_NAMES.test(t)));
+  // A suffix or title alone is not a name.
+  if (!kept.some((t) => !SUFFIX.test(t) && !TITLE.test(t))) return null;
+  return kept.join(' ');
+}
+
+/**
+ * The card name from the top of the card. Position beats length: names come
+ * first, while junk and rules text can be any length anywhere.
+ */
+export function pickName(text) {
+  let best = null;
+  lines(text).slice(0, 8).forEach((line, i) => {
+    if (ABOUT_ANOTHER.test(line)) return;
+    const value = nameFromLine(line);
+    if (!value) return;
+    const score = 10 - i * 2.5 + Math.min(value.replace(/[^A-Za-zÀ-ÿ]/g, '').length, 12) * 0.3;
+    if (!best || score > best.score) best = { value, raw: line, score };
+  });
+  return best;
+}
+
+/**
+ * How well `needle` appears somewhere inside `haystack`, 0..1. The text around
+ * a name is full of junk — HP, symbols, a stage label — so comparing a whole
+ * line to the name punishes a correct read. This looks for the name inside it.
+ * Very short needles must match exactly: they would fuzzy-match almost anything.
+ */
+export function containsFuzzy(haystack, needle) {
+  const h = fold(haystack), n = fold(needle);
+  if (!n || !h) return 0;
+  if (h.includes(n)) return 1;
+  if (n.length < 4) return 0;
+  let best = 0;
+  for (const len of [n.length - 1, n.length, n.length + 1]) {
+    if (len > h.length) continue;
+    for (let i = 0; i + len <= h.length; i++) {
+      best = Math.max(best, similarity(h.slice(i, i + len), n));
+      if (best === 1) return 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * The text with any "Evolves from <another Pokémon>" lines removed. Matching a
+ * candidate's name against text that mentions a different Pokémon would let the
+ * wrong card score as a perfect match.
+ */
+export function withoutEvolutionLines(text) {
+  return lines(text).filter((l) => !ABOUT_ANOTHER.test(l)).join('\n');
 }
