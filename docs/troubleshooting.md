@@ -30,9 +30,15 @@ In order of likelihood:
    language on the upload screen.
 2. **Glare.** The most common cause by a distance. Move out from under direct
    overhead light, tilt the card, and take sleeved cards out of the sleeve.
-3. **The card number is not visible.** It is our strongest signal. If it is
+3. **The card is small in the photo, or the table is busy.** The number is about
+   as tall as a fingernail's width on a real card, so it needs pixels. Fill most
+   of the frame with the card, on a plain surface, with all four edges visible.
+   A card lying on a surface close to its own colour is harder to find.
+4. **The card number is not visible.** It is our strongest signal. If it is
    cropped out or covered, matching has little to work with.
-4. **Unsupported game.** Only Pokémon is wired up today.
+5. **Black-bordered cards** print the number in white. They are read a second
+   time to cope with that, but strong glare on the border can still defeat it.
+6. **Unsupported game.** Only Pokémon is wired up today.
 
 ## "We stopped scanning"
 
