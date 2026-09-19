@@ -28,7 +28,7 @@ npm start          # http://localhost:8080
 `npm start` runs a small static server from `tools/serve.js`. You need one:
 the app is made of ES modules, which browsers refuse to load from `file://`.
 
-Node 20 or newer. Nothing is installed — `package.json` has no dependencies.
+Node 22 or newer. Nothing is installed — `package.json` has no dependencies.
 
 ---
 

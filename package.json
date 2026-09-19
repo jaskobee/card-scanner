@@ -11,7 +11,7 @@
     "check": "node tools/check.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "keywords": ["trading-cards", "ocr", "ebay", "csv", "pokemon"],
   "license": "MIT"
