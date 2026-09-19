@@ -100,6 +100,77 @@ test('punctuation is tidied before a name is ranked, so ELLIS, still counts', ()
   assert.match(ranked[0].text, /ELLIS/);
 });
 
+// --- from real photographs: a scanned Topps Chrome wrestling card -------------------------
+// These are what Tesseract really returned for a real card, not a drawn one. The card is
+// 1000 x 1434 here, so H is not 1400; the helper's percentages hold for either.
+
+test('stripe pattern read as lettering does not outrank the name on the plate', () => {
+  // "NLE SE" was the gold halftone stripe above the nameplate: big, and one word only 22% sure.
+  // "BRAY WYATT" was the plate: smaller, and 69% and 97% sure.
+  const words = [
+    word('NLE', 73, 5.5, 81, 225, 150), word('SE', 22, 5.5, 81, 400, 120),
+    word('BRAY', 69, 2.5, 87, 440, 110), word('WYATT', 97, 2.5, 87, 580, 140),
+  ];
+  const ranked = rankNames(groupIntoLines(dedupeWords(words)), H);
+  assert.equal(ranked[0].text, 'BRAY WYATT');
+});
+
+test('a line knows its least certain word, which its average hides', () => {
+  const [line] = groupIntoLines(dedupeWords([word('NLE', 73, 5.5, 81, 225, 150), word('SE', 22, 5.5, 81, 400, 120)]));
+  assert.ok(Math.abs(line.weakest - 0.22) < 1e-9, String(line.weakest));
+  assert.ok(line.confidence > 0.5, 'the average alone looks respectable');
+});
+
+test('a low-confidence word inside a real name does not rule the name out', () => {
+  // "JORDAN" was 28% sure and correct. Only reading it again settles that, so it must reach that step.
+  const words = [word('„JORDAN', 28, 3, 90, 100, 280), word('ELLIS,', 67, 5.1, 90, 400, 140)];
+  assert.ok(rankNames(groupIntoLines(dedupeWords(words)), H).length > 0);
+});
+
+test('reading a name again by itself corrects a misread letter and lifts its confidence', () => {
+  // "BRAY WATT" (39% sure) beside the plate; read on its own it was "BRAY WYATT", 94% sure.
+  const got = pickReading({ text: 'BRAY WATT', confidence: 0.39 }, [
+    { text: 'BRAY WYATT', confidence: 0.74 }, { text: 'BRAY WYATT', confidence: 0.94 },
+  ]);
+  assert.equal(got.text, 'BRAY WYATT');
+  assert.equal(got.confidence, 0.94);
+  assert.equal(got.weakest, 0.94, 'a line read on its own has no separately weak word');
+});
+
+test('a reading of a crop that cut the name short does not replace a sure first reading', () => {
+  // Real, from a drawn card: LENA OKAFOR was read 93% sure, then a clipped crop gave "ENA OKA" at 95%.
+  const got = pickReading({ text: 'LENA OKAFOR', confidence: 0.93 }, [
+    { text: 'ENA OKA', confidence: 0.95 }, { text: 'ENA OKAFO', confidence: 0.92 },
+  ]);
+  assert.equal(got.text, 'LENA OKAFOR');
+});
+
+test('but a shorter reading may still replace a first reading that was not sure', () => {
+  // "WHITLOCK Ir" (junk beside the name, 60% sure) is better as "WHITLOCK".
+  const got = pickReading({ text: 'WHITLOCK Ir', confidence: 0.6 }, [{ text: 'WHITLOCK', confidence: 0.92 }]);
+  assert.equal(got.text, 'WHITLOCK');
+});
+
+test('a name in ordinary type is not split, only capitals are respaced', () => {
+  // A Pokemon name, "Regigigas", came back from a second reading as "Regigi gas".
+  const got = pickReading({ text: 'Regigigas', confidence: 0.84 }, [{ text: 'Regigi gas', confidence: 0.95 }]);
+  assert.equal(got.text, 'Regigigas');
+});
+
+test('the spacing most readings agree on wins, not the single surest reading', () => {
+  // Real, from a drawn card: three readings said "SOFIA MARINO", one said "SOFIA MA RINO" and was surest.
+  const got = pickReading({ text: 'SOFIAMARINO', confidence: 0.8 }, [
+    { text: 'SOFIA MARINO', confidence: 0.85 }, { text: 'SOFIA MA RINO', confidence: 0.93 },
+    { text: 'SOFIA MARINO', confidence: 0.83 }, { text: 'SOFIA MARINO', confidence: 0.81 },
+  ]);
+  assert.equal(got.text, 'SOFIA MARINO');
+});
+
+test('capitals that ran together are still respaced', () => {
+  const got = pickReading({ text: 'JORDANELLIS', confidence: 0.8 }, [{ text: 'JORDAN ELLIS', confidence: 0.85 }]);
+  assert.equal(got.text, 'JORDAN ELLIS');
+});
+
 // --- several readings of the same text ---------------------------------------------------
 
 test('a fragment and the whole word read from overlapping strips collapse to the whole word', () => {

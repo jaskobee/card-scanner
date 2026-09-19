@@ -174,6 +174,9 @@ function update(line) {
   line.height = lowerMedian(ws.map(height));
   const weight = ws.reduce((n, w) => n + w.text.length, 0) || 1;
   line.confidence = ws.reduce((n, w) => n + w.confidence * w.text.length, 0) / weight;
+  // "NLE SE" averaged to 53% because "NLE" was 73% sure and "SE" 22%, and the 22% was
+  // stripe pattern. The average hides that; the weakest word does not.
+  line.weakest = Math.min(...ws.map((w) => w.confidence));
   line.text = [...ws].sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' ');
 }
 
@@ -263,7 +266,7 @@ export function rankNames(lines, cardHeight) {
     // and both lines have to be plausible in their own right.
     const both = nameLikeness(tidyName(a.text)) > 0 && nameLikeness(tidyName(b.text)) > 0 && a.confidence >= 0.5 && b.confidence >= 0.5;
     if (sameSize && close && aligned && words <= 3 && both) {
-      pool.push({ text: `${a.text} ${b.text}`, height: Math.max(a.height, b.height), confidence: Math.min(a.confidence, b.confidence), y0: a.y0, y1: b.y1, x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), joined: true });
+      pool.push({ text: `${a.text} ${b.text}`, height: Math.max(a.height, b.height), confidence: Math.min(a.confidence, b.confidence), weakest: Math.min(a.weakest ?? a.confidence, b.weakest ?? b.confidence), y0: a.y0, y1: b.y1, x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), joined: true });
     }
   }
 
@@ -277,7 +280,15 @@ export function rankNames(lines, cardHeight) {
       // A nameplate low on the card and a banner high on it are equally likely homes
       // for a name, so neither is favoured over the other.
       const place = (at > 0.7 && at < 0.95) || (at > 0.03 && at < 0.2) ? 0.09 : 0;
-      const score = 0.4 * size + 0.3 * l.confidence + 0.2 * likeness + place + (l.joined ? 0.09 : 0);
+      // Whether this is lettering at all, which is a different question from whether it is
+      // the name. On real cards lettering reads 80 to 95 percent sure and the patterns that
+      // pass for it (stripes, logos) 20 to 55, so confidence counts for nothing once it is
+      // high enough: a team name read at 95 is not a better name than a player read at 85.
+      // The least certain word counts a little on its own, but never rules a line out: a
+      // real name can have one word read at 28 percent, and only reading it again settles that.
+      const sure = 0.7 * l.confidence + 0.3 * (l.weakest ?? l.confidence);
+      const lettering = Math.max(0, Math.min(1, (sure - 0.4) / 0.4));
+      const score = 0.4 * size + 0.3 * lettering + 0.2 * likeness + place + (l.joined ? 0.09 : 0);
       return { text, score, confidence: l.confidence, height: l.height, line: l };
     })
     .filter((c) => c && c.confidence >= 0.35 && c.height >= 0.012 * cardHeight)
@@ -336,25 +347,44 @@ const spaces = (t) => (String(t ?? '').match(/ /g) ?? []).length;
  * Choose among further readings of a line. A single-line reading recovers word
  * spaces the first pass lost, and it can also drop a letter or split at a hyphen.
  * So a reading is preferred, in order:
- *   1. if it is the same letters as the first with spaces put back (JORDANELLIS to
- *      JORDAN ELLIS): that is the first reading, corrected, and the most sure of
- *      those wins;
+ *   1. if the first reading is in capitals and this is the same letters with spaces
+ *      put back (JORDANELLIS to JORDAN ELLIS): that is the first reading, corrected,
+ *      and the most sure of those wins. Only capitals: tightly set italic capitals are
+ *      what run together, and in ordinary type a gap inside a word is only a gap
+ *      ("Regigigas" was split into "Regigi gas");
  *   2. otherwise the reading that looks most like a printed line, if it beats the
  *      first;
  *   3. otherwise the first reading, untouched.
+ * A reading that is only part of a first reading that was already sure is ignored: a crop
+ * that cut the line short reads its remainder confidently.
  * @param {{text: string, confidence: number}} original
  * @param {Array<{text: string, confidence: number}|null>} readings
  */
 export function pickReading(original, readings) {
-  const usable = (readings ?? []).filter((r) => r && r.text);
-  const respaced = usable
-    .filter((r) => lettersOf(r.text) === lettersOf(original.text) && spaces(r.text) > spaces(original.text) && nameLikeness(r.text) > 0)
-    .sort((a, b) => b.confidence - a.confidence)[0];
-  if (respaced) return { text: respaced.text, confidence: Math.max(original.confidence, respaced.confidence) };
+  // A reading that is only part of a good first reading is a crop that cut the line short,
+  // not a correction: "ENA OKA" (95% sure) was read from a crop of "LENA OKAFOR" (93%).
+  const first = lettersOf(original.text);
+  const cutShort = (r) => original.confidence >= 0.8 && lettersOf(r.text).length < first.length && first.includes(lettersOf(r.text));
+  const usable = (readings ?? []).filter((r) => r && r.text && !cutShort(r));
+  const capitals = /[A-ZÀ-Þ]/.test(original.text) && original.text === original.text.toUpperCase();
+  // Of the readings that put spaces back, the spacing most of them agree on wins, and the
+  // most sure of those breaks a tie. One stray reading that splits a word ("SOFIA MA RINO")
+  // must not beat the four that did not.
+  const votes = new Map();
+  if (capitals) {
+    for (const r of usable) {
+      if (lettersOf(r.text) !== lettersOf(original.text) || spaces(r.text) <= spaces(original.text) || nameLikeness(r.text) === 0) continue;
+      const v = votes.get(r.text) ?? { text: r.text, n: 0, confidence: 0 };
+      v.n += 1; v.confidence = Math.max(v.confidence, r.confidence);
+      votes.set(r.text, v);
+    }
+  }
+  const respaced = [...votes.values()].sort((a, b) => b.n - a.n || b.confidence - a.confidence)[0] ?? null;
+  if (respaced) return { text: respaced.text, confidence: Math.max(original.confidence, respaced.confidence), weakest: respaced.confidence };
 
   const quality = (r) => r.confidence * nameLikeness(r.text);
   const best = usable.sort((a, b) => quality(b) - quality(a))[0];
-  return best && quality(best) > quality(original) ? { text: best.text, confidence: best.confidence } : original;
+  return best && quality(best) > quality(original) ? { text: best.text, confidence: best.confidence, weakest: best.confidence } : original;
 }
 
 /** The two-reading form of pickReading. */
