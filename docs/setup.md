@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node 20 or newer — for the dev server and the tests
+- Node 22 or newer — for the dev server and the tests
 - A current browser — Chrome, Edge, Firefox or Safari
 
 The application has **no dependencies**. `package.json` lists none, `npm
