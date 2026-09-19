@@ -33,6 +33,7 @@ const app = {
   search: '',
   sort: { key: 'createdAt', dir: 'asc' },
   reviewIndex: 0,
+  textsOpen: false,      // the "everything we read" list on the review screen
   queue: null,
   ocr: new OcrPool(),
   provider: new PokemonTcgdexProvider({ language: 'en' }),
@@ -756,13 +757,26 @@ function viewReview() {
         h('div', { class: 'row', style: { marginBottom: '10px' } },
           confidenceBadge(b, card.confidence),
           h('span', { class: 'tiny muted' },
-            `${Math.round(card.confidence * 100)}% · margin ${Math.round(card.margin * 100)}%`),
+            readFromText(card)
+              ? 'Read from the card, not matched to a database'
+              : `${Math.round(card.confidence * 100)}% · margin ${Math.round(card.margin * 100)}%`),
         ),
 
         h('div', { class: 'fieldlist' },
-          ...[...COLUMNS, { key: 'manufacturer', label: 'Maker' }, { key: 'language', label: 'Language' }]
+          ...[...COLUMNS, { key: 'manufacturer', label: 'Maker' }, { key: 'language', label: 'Language' },
+            // What a card that is not in a database can carry, shown only when it was found.
+            { key: 'serial', label: 'Print run' }, { key: 'league', label: 'League' }, { key: 'sport', label: 'Sport' }]
+            .filter((col) => !['serial', 'league', 'sport'].includes(col.key) || valueOf(card, col.key))
             .map((col) => fieldRow(card, col)),
         ),
+
+        readFromText(card)
+          ? h('div', { class: 'notice', style: { marginTop: '12px' } },
+              h('strong', {}, 'No database covers this kind of card. '),
+              'So nothing vouches for these values: they are what we could read off the card. Check each one against the photo, and pick from the lines below if we chose the wrong one.')
+          : null,
+        otherNames(card),
+        textsFound(card),
 
         h('h3', { style: { marginTop: '18px' } }, 'For eBay'),
         h('p', { class: 'tiny muted', style: { marginTop: 0 } },
@@ -829,6 +843,52 @@ function fieldRow(card, col) {
           }, icon('copy', 13))
         : null,
     ),
+  );
+}
+
+// --- a card read from its text ----------------------------------------------------
+
+const readFromText = (card) => card.meta?.read === 'text';
+
+/** Other lines that could have been the name, one click to choose. */
+function otherNames(card) {
+  const current = valueOf(card, 'name');
+  const others = (card.meta?.names ?? []).filter((n) => n && n !== current);
+  if (!others.length) return null;
+  return h('div', { class: 'row', style: { marginTop: '10px' } },
+    h('span', { class: 'tiny muted' }, 'Other names we saw:'),
+    ...others.map((n) => h('button', { class: 'btn small', onClick: () => setUser(card, 'name', n) }, n)),
+  );
+}
+
+const ASSIGN = [
+  ['name', 'Name'], ['set', 'Set'], ['number', 'Number'], ['year', 'Year'], ['manufacturer', 'Maker'],
+  ['variant', 'Variant'], ['league', 'League'], ['team', 'Team'],
+];
+
+/**
+ * Every line of text found on the card, biggest first, each with a way to say what
+ * it is. The reader picks the likeliest name and the obvious brand words, but a
+ * team logo or a slogan can be as big as a name, so the choice is always the user's.
+ */
+function textsFound(card) {
+  const texts = card.meta?.texts ?? [];
+  if (!texts.length) return null;
+  return h('details', {
+    style: { marginTop: '12px' }, open: app.textsOpen,
+    onToggle: (e) => { app.textsOpen = e.target.open; },
+  },
+    h('summary', { class: 'tiny', style: { cursor: 'pointer' } }, `Everything we read on this card (${texts.length})`),
+    h('p', { class: 'tiny muted', style: { margin: '8px 0' } }, 'Biggest lettering first. Say what a line is and it goes into that field.'),
+    h('div', { class: 'fieldlist' },
+      ...texts.map((t) => h('div', { class: 'textrow' },
+        h('span', { class: 't' }, t.text),
+        h('span', { class: 'tiny muted', title: 'How sure the reading was' }, `${Math.round(t.confidence * 100)}%`),
+        h('select', {
+          class: 'field', style: { width: 'auto' }, 'aria-label': `What is “${t.text}”?`,
+          onChange: (e) => { if (e.target.value) setUser(card, e.target.value, t.text); },
+        }, h('option', { value: '' }, 'Use as…'), ...ASSIGN.map(([k, label]) => h('option', { value: k }, label))),
+      ))),
   );
 }
 
@@ -1025,6 +1085,7 @@ const FIELD_LABELS = {
   category: 'Category', conditionId: 'Condition ID', condition: 'Condition (written)',
   cardConditionId: 'Card condition', graderId: 'Grader', gradeId: 'Grade', certificationNumber: 'Certificate number',
   action: 'Action', format: 'Format', duration: 'Duration',
+  sport: 'Sport', league: 'League', team: 'Team', serial: 'Print run',
   name: 'Card name', number: 'Card number', set: 'Set', year: 'Year', manufacturer: 'Manufacturer',
   game: 'Game', language: 'Language', variant: 'Variant', grade: 'Grade (written)', gradingCompany: 'Grader (written)',
 };

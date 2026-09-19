@@ -211,6 +211,73 @@ log(retry.whiteOnBlack.number === '4/102', 'the inverted reading is used when it
 log(retry.misread.number === '4/999', 'a number that is not valid is reported as read, not repaired', retry.misread.number);
 log(retry.misread.card.state === 'NEEDS_REVIEW', 'and the card goes to review', retry.misread.card.state);
 
+// --- a card that no database knows ------------------------------------------------
+// A wrestling card, a football card: the strips look where Pokémon put things and
+// read junk ("GERI"), and the database has never heard of it. The card still has
+// its name and its small print on it, so the whole card is read for text. The stub
+// gives the strip reader that junk and the general reader a name on a nameplate
+// and a legal line, each at its own place, so this tests the wiring: that the
+// printed text wins over the junk, and that each value keeps the words it came from.
+
+const unknown = await page.evaluate(async () => {
+  const { processImage } = await import('/src/pipeline.js');
+  const { valueOf } = await import('/src/model.js');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 600; canvas.height = 840;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#222'; ctx.fillRect(0, 0, 600, 840);
+  ctx.fillStyle = '#f4f0e4'; ctx.fillRect(40, 40, 520, 760);
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  const file = new File([blob], 'unknown.png', { type: 'image/png' });
+
+  const word = (text, x0, y0, x1, y1) => ({ text, confidence: 0.92, bbox: { x0, y0, x1, y1 } });
+  const seen = { top: 0, general: 0, single: 0 };
+  const ocr = {
+    recognise: async (_img, { psm } = {}) => {
+      if (psm === 6) { seen.top++; return { text: 'GERI', confidence: 0.5, words: [], lines: [], symbols: [] }; }
+      if (psm === 7) { seen.single++; return { text: 'JORDAN ELLIS', confidence: 0.94, words: [], lines: [], symbols: [] }; }
+      seen.general++;
+      return {
+        text: 'JORDAN ELLIS\n© 2022 THE TOPPS COMPANY, INC.',
+        confidence: 0.9,
+        words: [
+          word('JORDAN', 60, 40, 330, 140), word('ELLIS', 360, 40, 560, 140),
+          word('©', 60, 250, 80, 275), word('2022', 90, 250, 150, 275), word('THE', 160, 250, 200, 275),
+          word('TOPPS', 210, 250, 290, 275), word('COMPANY,', 300, 250, 420, 275), word('INC.', 430, 250, 480, 275),
+        ],
+        lines: [], symbols: [],
+      };
+    },
+  };
+  const provider = { id: 'stub', knownTotals: async () => new Set(), search: async () => [] };
+
+  const card = await processImage({ file, projectId: 'test', provider, ocr });
+  const f = card.fields;
+  return {
+    name: valueOf(card, 'name'), nameSource: f.name.source, nameEvidence: f.name.evidence,
+    maker: valueOf(card, 'manufacturer'), makerEvidence: f.manufacturer.evidence,
+    year: valueOf(card, 'year'), yearEvidence: f.year.evidence,
+    number: valueOf(card, 'number'), set: valueOf(card, 'set'), variant: valueOf(card, 'variant'),
+    game: valueOf(card, 'game'), flags: card.flags, state: card.state, read: card.meta.read,
+    texts: (card.meta.texts ?? []).map((t) => t.text), seen,
+  };
+});
+
+log(/^jordan ellis$/i.test(unknown.name ?? ''), 'a card no database knows still gets the name printed on it', String(unknown.name));
+log(unknown.nameSource === 'ocr', 'and it is credited to the text read, not to a database', unknown.nameSource);
+log(/jordan/i.test(unknown.nameEvidence ?? ''), 'the words it was read from are kept as evidence', unknown.nameEvidence);
+log(unknown.maker === 'Topps', 'the manufacturer comes from the legal line', String(unknown.maker));
+log(/topps/i.test(unknown.makerEvidence ?? ''), 'with that line as its evidence', unknown.makerEvidence);
+log(unknown.year === 2022, 'the year comes from the © line', String(unknown.year));
+log(unknown.number === null && unknown.set === null, 'a number and a set nobody printed are left empty, not invented');
+log(unknown.game === null, 'no game is assumed');
+log(unknown.state === 'NEEDS_REVIEW', 'it goes to review, where a person confirms it', unknown.state);
+log(unknown.flags.includes('number'), 'and the missing number is flagged', unknown.flags.join(','));
+log(unknown.read === 'text', 'the card is marked as read from its text, for the review screen', String(unknown.read));
+log(unknown.texts.some((t) => /topps/i.test(t)), 'everything read is kept so a person can assign it by hand', unknown.texts.join(' | '));
+log(unknown.seen.single >= 1, 'the likeliest name is read again on its own line', String(unknown.seen.single));
+
 // --- selecting and deleting cards, against real IndexedDB -----------------------
 // Deleting must remove the photos too: they are the full-resolution originals,
 // and leaving them behind would fill the browser's storage invisibly.
