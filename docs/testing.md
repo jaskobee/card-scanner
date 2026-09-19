@@ -110,6 +110,61 @@ sent to review for its variant (`CLAUDE.md` §5): a photo cannot show holo from
 normal. And nothing here has touched sleeved cards, slabs, foil glare in the
 real world, or any game but Pokémon.
 
+### Cards no database knows — `tools/accuracy-generic.mjs`
+
+Sports, wrestling and film cards have no free database, so there is nothing to
+check a reading against except what was printed on the card. This draws cards
+(`tools/synthetic-cards.js`): five layouts (a nameplate low down, a banner up
+high, a name stacked at the side, a big centred name, a stripe across the middle)
+with a brand logo, a team, stats, legal print and serial numbers around the name,
+and invented people. It records what it drew, degrades each card into a photo
+(`tools/synthetic-photo.js`, shared with `accuracy.mjs`), runs the real pipeline
+with a stand-in where the database would be, and compares.
+
+```bash
+npm start                                            # one terminal
+node tools/accuracy-generic.mjs                      # another; ~4½ minutes
+node tools/accuracy-generic.mjs --via reader         # only the text reader; faster
+node tools/accuracy-generic.mjs --save /tmp/missed   # keep the photos that went wrong
+```
+
+**The cards are drawn, not real.** They have the awkward parts (a decoy as big as
+the name, italic capitals, light on dark) but not real photography, foil glare or
+print detail, so real photos are harder. The people are made up. Use it to compare
+one version of the reader with another and to find what breaks, never as a
+promise about real cards. Twenty cards is small: one card is five points.
+
+Measured 2026-09-19, the same 60 photos each time. "Before" is the strips alone,
+as shipped, which is what read a Bray Wyatt card as "GERI".
+
+| condition | name found, before → now | with the spaces right | maker | product | year |
+|---|---|---|---|---|---|
+| clean | 20% → 95% | 20% → 85% | 0% → 90% | 0% → 94% | 23% → 100% |
+| easy photo | 10% → 75% | 10% → 60% | 0% → 100% | 0% → 100% | 8% → 100% |
+| medium | 5% → 55% | 5% → 50% | 0% → 100% | 0% → 100% | 0% → 69% |
+
+What is still wrong, from the misses the tool lists: a name stacked over two
+lines comes out as its surname alone about half the time (`stacked-left` finds the
+whole name 42% of the time), a blurry photo loses the first letters ("JOR ELLIS"),
+and a few names get a space in the wrong place ("TO BIAS") or none
+("JORDANELLIS"). Every card read this way goes to review, because nothing vouches
+for it, and none can be auto-accepted; that is the property that must not
+change, more than any percentage above.
+
+### Your own photos — `tools/scan-photos.mjs`
+
+```bash
+node tools/scan-photos.mjs                     # every photo in test-data/local/
+node tools/scan-photos.mjs --save /tmp/seen    # also draw what it found on each card
+```
+
+Runs the real scanner on photos you drop into `test-data/local/` (git ignores
+everything in it except its README) and prints, for each: the fields with where
+each came from and how sure the scanner was, the other names it considered, and
+every line of text it could read, biggest first. When a card scans badly, this
+shows whether the text was never read or was read and the wrong line chosen.
+That is what a labelled set of real photos will be built from.
+
 ### The eBay file — `test/ebay.test.mjs` and `test/smoke.mjs`
 
 Unit tests cover the eBay knowledge (categories, the four ungraded conditions,

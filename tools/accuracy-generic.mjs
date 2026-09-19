@@ -155,4 +155,10 @@ if (bad.length) {
   console.log('\nmisses:');
   for (const r of bad) console.log(`  ${r.id}/${r.condition}: wanted "${r.truth.name}", got ${JSON.stringify(r.got.name)}  (others: ${r.got.names.slice(1, 3).map((n) => JSON.stringify(n)).join(', ') || 'none'})`);
 }
+// Right letters, wrong spaces ("JORDA NELLIS") count as found above but read badly on a listing.
+const spacing = results.filter((r) => r.nameOk && !r.nameSpaced).slice(0, 8);
+if (spacing.length) {
+  console.log('\nright letters, wrong spaces:');
+  for (const r of spacing) console.log(`  ${r.id}/${r.condition}: wanted "${r.truth.name}", got ${JSON.stringify(r.got.name)}`);
+}
 if (pageErrors.length) console.log('\npage errors:', pageErrors.slice(0, 3));
