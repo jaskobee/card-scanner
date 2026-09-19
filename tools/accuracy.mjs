@@ -74,9 +74,15 @@ async function ensureFixtures() {
 
 function loadPlaywright() {
   const require = createRequire(import.meta.url);
-  const candidates = [process.env.PLAYWRIGHT_PATH, 'playwright', '/usr/lib/node_modules/playwright'].filter(Boolean);
+  const candidates = [process.env.PLAYWRIGHT_PATH, 'playwright', 'playwright-core', '/usr/lib/node_modules/playwright'].filter(Boolean);
   for (const c of candidates) { try { return require(c); } catch { /* try the next */ } }
-  console.error('Playwright is not installed. Run: npm i -D playwright');
+  console.error([
+    'Playwright is not installed. This tool drives a real browser. Nothing here is added to package.json:',
+    '  npm i --no-save playwright-core                 # small; then point it at a browser you already have:',
+    '  CHROMIUM_PATH=/usr/bin/chromium node ' + process.argv[1].replace(process.cwd() + '/', ''),
+    'or let Playwright fetch its own browser (larger):',
+    '  npm i --no-save playwright && npx playwright install chromium',
+  ].join('\n'));
   process.exit(2);
 }
 

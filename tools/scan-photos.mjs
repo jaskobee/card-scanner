@@ -1,9 +1,11 @@
 // Run the real scanner on your own photos and show what it read, and from where.
 //
-//   npm start                                        # in another terminal
 //   node tools/scan-photos.mjs                       # every photo in test-data/local/
 //   node tools/scan-photos.mjs --dir ~/Pictures/cards
 //   node tools/scan-photos.mjs --save /tmp/overlays  # also draw what it found on each card
+//   node tools/scan-photos.mjs --base http://localhost:8080   # use an app that is already running
+//
+// It starts the app itself for the length of the run unless you point it at one.
 //
 // For each photo it prints the fields the app would fill in, with where each came
 // from and how sure it is, then every line of text it could read. When a card
@@ -14,6 +16,7 @@
 // network. Your photos stay on this machine: nothing is uploaded except the name
 // and number the app looks up, exactly as in the app. It is not part of CI.
 
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -21,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
-const base = arg('base', 'http://localhost:8080');
+let base = arg('base', '');
 const dir = resolve(arg('dir', join(ROOT, 'test-data/local')));
 const saveDir = arg('save', '');
 
@@ -34,10 +37,16 @@ if (!photos.length) {
 
 function loadPlaywright() {
   const require = createRequire(import.meta.url);
-  for (const c of [process.env.PLAYWRIGHT_PATH, 'playwright', '/usr/lib/node_modules/playwright'].filter(Boolean)) {
+  for (const c of [process.env.PLAYWRIGHT_PATH, 'playwright', 'playwright-core', '/usr/lib/node_modules/playwright'].filter(Boolean)) {
     try { return require(c); } catch { /* next */ }
   }
-  console.error('Playwright is not installed. Run: npm i -D playwright');
+  console.error([
+    'Playwright is not installed. This tool drives a real browser. Nothing here is added to package.json:',
+    '  npm i --no-save playwright-core                 # small; then point it at a browser you already have:',
+    '  CHROMIUM_PATH=/usr/bin/chromium node ' + process.argv[1].replace(process.cwd() + '/', ''),
+    'or let Playwright fetch its own browser (larger):',
+    '  npm i --no-save playwright && npx playwright install chromium',
+  ].join('\n'));
   process.exit(2);
 }
 
@@ -47,9 +56,14 @@ const page = await browser.newPage();
 page.setDefaultTimeout(0);
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(String(e)));
-try { await page.goto(base, { waitUntil: 'networkidle' }); } catch {
-  console.error(`Could not reach ${base}. Start the app first: npm start`);
-  process.exit(2);
+const reachable = async (url) => { try { await page.goto(url, { waitUntil: 'networkidle' }); return true; } catch { return false; } };
+let server = null;
+process.on('exit', () => server?.kill());
+if (!(base && await reachable(base))) {
+  if (base) { console.error(`Could not reach ${base}. Leave --base off and the app is started for you.`); process.exit(2); }
+  server = spawn(process.execPath, [join(ROOT, 'tools/serve.js')], { env: { ...process.env, PORT: '8123' }, stdio: 'ignore' });
+  base = 'http://localhost:8123';
+  for (let i = 0; i < 40 && !(await reachable(base)); i++) await new Promise((r) => setTimeout(r, 250));
 }
 
 await page.evaluate(async () => {
@@ -134,3 +148,4 @@ for (const name of photos) {
 }
 if (pageErrors.length) console.log('\npage errors:', pageErrors.slice(0, 3));
 await browser.close();
+server?.kill();
