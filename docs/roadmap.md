@@ -7,19 +7,20 @@ before infrastructure gets built.
 
 - [x] Multi-image upload, drag-and-drop and file picker
 - [x] Image quality checks with plain-language advice
-- [x] Card detection and cropping
-- [x] Browser OCR in a worker pool
+- [x] Finding the card in a photo and straightening it, from the full-resolution original
+- [x] Browser OCR in a worker pool, reading the name and number strips separately
 - [x] Signal extraction: number, year, copyright, variant, language, name
 - [x] Pokémon identification via TCGdex
 - [x] Confidence with margin and field-level flags
 - [x] Inline editing everywhere, copy buttons everywhere
 - [x] Batches, sorting, filtering, search
+- [x] Multi-select in the cards table: shift-click ranges, bulk copy, bulk delete
 - [x] Duplicate detection and merge-to-quantity
 - [x] Keyboard-first review queue
 - [x] Generic CSV, JSON, and template-driven eBay CSV
 - [x] Job queue with retry, backoff, circuit breaker, resume
 - [x] Static deployment, no build step
-- [ ] **Labelled fixture set and a measured accuracy figure**
+- [ ] **A labelled set of real photos and a measured accuracy figure** (a synthetic measurement exists: see `testing.md`)
 - [ ] Front/back image pairing (modelled, not wired)
 
 ## Phase 2
@@ -31,7 +32,9 @@ before infrastructure gets built.
 - [ ] Item specifics (`C:` columns) for cards, from the real templates rather than guessed
 - [ ] Batch retry from the results view
 - [ ] Per-card processing diagnostics in the UI
-- [ ] Better name extraction — the current heuristic is the weakest link
+- [x] Better name extraction — the name strip is read alone and verified against the database
+- [ ] Trim the located card to its true edge (a drop shadow inflates it a few percent)
+- [ ] Correct perspective, not only tilt
 - [ ] Variant selection from the printing's known finishes
 - [ ] Project statistics panel
 - [ ] Export presets
@@ -57,8 +60,8 @@ These are listed so they are not forgotten, not so they are started.
 
 | Risk | Exposure | Mitigation |
 |---|---|---|
-| Accuracy unmeasured | Cannot promise anything yet | Fixture set is the next task |
-| Name extraction is a heuristic | Wrong name on low-text cards | Number carries most of the weight; review catches the rest |
+| Accuracy on real photos unmeasured | Cannot promise anything yet | Synthetic measurement exists; a labelled real-photo set is the next task |
+| Name extraction is a heuristic | Wrong name on low-text cards | Verified against the database; the number carries most of the weight; review catches the rest |
 | TCGdex availability | Free, volunteer-run | Breaker + cache; provider seam allows a fallback |
 | Sports cards have no free data | Blocks a whole market | Flagged early; decide before promising it |
 | No pricing | Sellers want it | Deliberate — separate system, no reliable free DE source |

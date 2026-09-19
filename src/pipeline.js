@@ -1,55 +1,145 @@
 // The processing pipeline. See CLAUDE.md §4.
-// image → quality → crop → OCR → signals → provider → rank → confidence → card
+// image → quality → find card → straighten → read strips → signals → provider → rank → confidence → card
 
-import { assessQuality, detectCardBounds, ISSUE } from './imagequality.js';
-import { prepareForOcr, makeThumbnail, boostContrast } from './ocr.js';
-import { findCardNumbers, findYears, findVariantTerms, guessLanguage, lines, findCopyright } from './normalize.js';
+import { assessQuality, ISSUE } from './imagequality.js';
+import { downscale, renderCard, regionForOcr, makeThumbnail } from './ocr.js';
+import { locateCard, scalePlacement } from './cardlocate.js';
+import {
+  findCardNumbers, findYears, findVariantTerms, guessLanguage, findCopyright,
+  findHp, pickName, withoutEvolutionLines,
+} from './normalize.js';
 import { rankCandidates } from './match.js';
 import { extracted, newCard, STATE, band } from './model.js';
 import { hashImageData } from './dupes.js';
 import * as store from './storage.js';
 
-/**
- * Pull identification signals out of OCR text.
- * Every signal keeps the raw span that produced it, as evidence.
- */
-export function extractSignals(text) {
-  const numbers = findCardNumbers(text);
-  const years = findYears(text);
-  const variants = findVariantTerms(text);
-  const language = guessLanguage(text);
-  const copyright = findCopyright(text);
+export { pickName };
 
-  // The card name is the longest plausible line in the top third of the card —
-  // a heuristic, so it is recorded as such and never scores as certain.
-  const candidateName = pickName(text);
+/**
+ * Pull identification signals out of OCR text. Every signal keeps the raw span
+ * that produced it, as evidence.
+ *
+ * The card is read in strips — the top (name, HP) and the bottom corners
+ * (number, year, copyright) — so each signal is taken from the strip it lives
+ * in. Given a single block of text, everything is read from that.
+ *
+ * `isKnownTotal` lets the caller say which set sizes really exist, so a
+ * denominator that is not one can be recognised as a misread.
+ */
+export function extractSignals(text, { nameText = text, bottomText = text, isKnownTotal = null } = {}) {
+  const numbers = findCardNumbers(bottomText);
+  const years = findYears(bottomText);
+  const variants = findVariantTerms(`${nameText}\n${bottomText}`);
+  const language = guessLanguage(`${nameText}\n${bottomText}`);
+  const copyright = findCopyright(bottomText);
+
+  // The name is a heuristic over OCR text, so it is recorded as one and never
+  // scores as certain.
+  const candidateName = pickName(nameText);
 
   return {
-    number: numbers[0] ?? null,
-    year: years[0] ?? (copyright?.year ? { value: copyright.year, raw: copyright.raw } : null),
+    number: pickNumber(numbers, isKnownTotal),
+    year: latest(years) ?? (copyright?.year ? { value: copyright.year, raw: copyright.raw } : null),
     variant: variants[0] ?? null,
     language: language ?? null,
     name: candidateName,
+    hp: findHp(nameText),
     allNumbers: numbers,
-    raw: text,
+    raw: `${nameText}\n${bottomText}`,
   };
 }
 
-const NOISE = /^(basic|stage \d|grundphase|stufe \d|hp|ps|weakness|resistance|retreat|schwäche|resistenz|rückzug|illus|illustrator|©|\d+$)/i;
+/**
+ * Base-set cards print "©1995, 96, 98, 99 Nintendo ... ©1999 Wizards": several
+ * years, of which the latest is the one that matches the set's release.
+ */
+function latest(years) {
+  return years.reduce((a, b) => (!a || b.value > a.value ? b : a), null);
+}
 
-export function pickName(text) {
-  const ls = lines(text).slice(0, 6);
-  const scored = ls
-    .filter((l) => l.length >= 3 && l.length <= 40)
-    .filter((l) => !NOISE.test(l))
-    .filter((l) => /[A-Za-zÀ-ÿ]{3,}/.test(l))
-    .map((l, i) => ({
-      value: l.replace(/\s*\d+\s*(HP|PS)\s*$/i, '').trim(),
-      raw: l,
-      score: (6 - i) + (/^[A-ZÀ-Þ]/.test(l) ? 2 : 0),
-    }))
-    .sort((a, b) => b.score - a.score);
-  return scored[0] ?? null;
+/**
+ * Which of the numbers read to trust. A denominator that is not a real set size
+ * is a misread, or a stray "2007/" from the copyright line, so numbers whose set
+ * size the database knows come first. Nothing is repaired or invented: the
+ * value is still exactly what was read.
+ */
+function pickNumber(numbers, isKnownTotal) {
+  const plausible = numbers.filter((n) => !(denominatorOf(n) < 5));
+  const known = isKnownTotal ? plausible.filter((n) => isKnownTotal(denominatorOf(n))) : [];
+  return known[0] ?? plausible[0] ?? null;
+}
+
+const denominatorOf = (n) => Number(String(n.denominator).replace(/\D/g, ''));
+
+/** Did this text yield a number that can be trusted: a real set size, if we know them? */
+function hasValidNumber(text, isKnownTotal) {
+  const n = pickNumber(findCardNumbers(text), isKnownTotal);
+  return Boolean(n) && (!isKnownTotal || isKnownTotal(denominatorOf(n)));
+}
+
+/**
+ * Read the strips that identify a card: the top for the name and HP, the two
+ * bottom corners for the number. Each is cropped, has its lighting removed, and
+ * is read on its own. The corners are read as sparse text, which copes with the
+ * illustrator credit, copyright and rarity mark sitting beside the number.
+ *
+ * Black-bordered cards print the number in white. If a normal reading finds no
+ * valid number, the corners are read again inverted, and that reading is used
+ * only if it does — so ordinary cards never pay for it and never risk it.
+ */
+async function readCard(cardCanvas, ocr, isKnownTotal) {
+  const read = async (region, targetHeight, psm, invert = false) =>
+    ocr.recognise(await regionForOcr(cardCanvas, region, { targetHeight, invert }), { psm });
+
+  const readBottom = async (invert) => {
+    const [left, right] = await Promise.all([
+      read('bottomLeft', 240, 11, invert),
+      read('bottomRight', 240, 11, invert),
+    ]);
+    return { text: `${left.text}\n${right.text}`, confidence: (left.confidence + right.confidence) / 2 };
+  };
+
+  const [top, normal] = await Promise.all([read('top', 200, 6), readBottom(false)]);
+  let bottom = normal;
+  if (!hasValidNumber(normal.text, isKnownTotal)) {
+    const inverted = await readBottom(true);
+    if (hasValidNumber(inverted.text, isKnownTotal)) bottom = inverted;
+  }
+  return {
+    top,
+    bottomText: bottom.text,
+    bottomConfidence: bottom.confidence,
+    confidence: (top.confidence + bottom.confidence) / 2,
+  };
+}
+
+/** One full reading of the card as framed: read it, extract signals, look it up, rank. */
+async function interpret({ canvas, ocr, provider, isKnownTotal }) {
+  const reading = await readCard(canvas, ocr, isKnownTotal);
+  // "Evolves from <another Pokémon>" must not be allowed to vouch for a name.
+  const nameText = withoutEvolutionLines(reading.top.text);
+  const signals = extractSignals(`${nameText}\n${reading.bottomText}`, {
+    nameText, bottomText: reading.bottomText, isKnownTotal,
+  });
+  const query = {
+    name: signals.name?.value ?? null,
+    nameText,
+    number: signals.number?.value ?? null,
+    hp: signals.hp?.value ?? null,
+    year: signals.year?.value ?? null,
+    language: signals.language?.value ?? null,
+    variant: signals.variant?.value ?? null,
+  };
+  const candidates = query.name || query.number ? await provider.search(query) : [];
+  return { reading, signals, query, ranked: rankCandidates(query, candidates) };
+}
+
+const isConfident = (a) => band(a.ranked.confidence, a.ranked.margin).key === 'HIGH';
+const hasSignal = (a) => Boolean(a.signals.name || a.signals.number);
+
+function isBetter(a, b) {
+  if (a.ranked.confidence !== b.ranked.confidence) return a.ranked.confidence > b.ranked.confidence;
+  return hasSignal(a) && !hasSignal(b);
 }
 
 /**
@@ -61,55 +151,58 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   const startedAt = performance.now();
   const card = newCard({ projectId });
 
-  // 1. Prepare and measure.
-  const prepared = await prepareForOcr(file);
-  const quality = assessQuality(prepared.imageData);
-  const hash = await hashImageData(prepared.imageData);
+  // Which set sizes exist, to tell a misread number from a real one.
+  const totals = provider.knownTotals ? await provider.knownTotals() : null;
+  const isKnownTotal = totals ? (d) => totals.has(d) : null;
 
-  // 2. Persist images out of the record itself.
-  const thumb = await makeThumbnail(file);
-  await store.putBlob(`${card.id}:front`, file);
-  await store.putBlob(`${card.id}:thumb`, thumb);
-  card.images = { front: `${card.id}:front`, back: null, thumb: `${card.id}:thumb` };
-  card.meta.hash = hash;
-  card.quality = quality;
+  // 1. Decode once at full resolution. Measure on a smaller copy; render the
+  //    card from the original so small print keeps the detail the photo has.
+  const bitmap = await createImageBitmap(file);
+  let best = null;
+  let quality, hash;
+  try {
+    const small = downscale(bitmap);
+    quality = assessQuality(small.imageData);
+    hash = await hashImageData(small.imageData);
+    const located = locateCard(small.imageData);
+    const placement = located ? scalePlacement(located, bitmap.width / small.width) : null;
 
-  if (signal?.aborted) throw abortError();
+    // 2. Persist images out of the record itself.
+    const thumb = await makeThumbnail(file);
+    await store.putBlob(`${card.id}:front`, file);
+    await store.putBlob(`${card.id}:thumb`, thumb);
+    card.images = { front: `${card.id}:front`, back: null, thumb: `${card.id}:thumb` };
+    card.meta.hash = hash;
+    card.quality = quality;
 
-  // 3. Crop to the card when one clearly stands out; otherwise use the frame.
-  const bounds = detectCardBounds(prepared.imageData);
-  let ocrSource = prepared.canvas;
-  if (bounds) {
-    const c = new OffscreenCanvas(bounds.width, bounds.height);
-    c.getContext('2d').drawImage(
-      prepared.canvas, bounds.x, bounds.y, bounds.width, bounds.height,
-      0, 0, bounds.width, bounds.height,
-    );
-    ocrSource = c;
-  } else {
-    card.flags = [...card.flags, 'crop'];
+    if (signal?.aborted) throw abortError();
+
+    // 3. Read the card as located; if that is not a confident identification,
+    //    take a second opinion before troubling the user. The finder can mistake
+    //    a card's own artwork for the card when it fills the frame, and a photo
+    //    can be upside down, so the alternatives are tried in turn.
+    const framings = placement
+      ? [['located', placement], ['whole-frame', null]]
+      : [['whole-frame', null]];
+    for (const [label, p] of framings) {
+      const attempt = { ...(await interpret({ canvas: renderCard(bitmap, p), ocr, provider, isKnownTotal })), framing: label };
+      if (!best || isBetter(attempt, best)) best = attempt;
+      if (isConfident(best) || signal?.aborted) break;
+    }
+    if (placement && !isConfident(best) && !hasSignal(best) && !signal?.aborted) {
+      const turned = { ...placement, angle: placement.angle + Math.PI };
+      const attempt = { ...(await interpret({ canvas: renderCard(bitmap, turned), ocr, provider, isKnownTotal })), framing: 'turned-around' };
+      if (isBetter(attempt, best)) best = attempt;
+    }
+  } finally {
+    bitmap.close();
   }
 
-  // 4. Read the text.
-  const ctx = ocrSource.getContext('2d', { willReadFrequently: true });
-  const forOcr = ctx.getImageData(0, 0, ocrSource.width, ocrSource.height);
-  ctx.putImageData(boostContrast(forOcr), 0, 0);
-
-  const blob = await ocrSource.convertToBlob({ type: 'image/png' });
-  const recognised = await ocr.recognise(blob);
-  card.meta.ocrConfidence = recognised.confidence;
-
   if (signal?.aborted) throw abortError();
 
-  // 5. Turn text into signals, and signals into a provider query.
-  const signals = extractSignals(recognised.text);
-  const query = {
-    name: signals.name?.value ?? null,
-    number: signals.number?.value ?? null,
-    year: signals.year?.value ?? null,
-    language: signals.language?.value ?? null,
-    variant: signals.variant?.value ?? null,
-  };
+  const { reading, signals, query, ranked } = best;
+  card.meta.ocrConfidence = reading.confidence;
+  card.meta.framing = best.framing;
 
   // Nothing readable is a real outcome, not a reason to guess.
   if (!query.name && !query.number) {
@@ -124,10 +217,6 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
     return card;
   }
 
-  // 6. Candidates and ranking.
-  const candidates = await provider.search(query);
-  const ranked = rankCandidates(query, candidates);
-
   card.meta.provider = provider.id;
   card.confidence = ranked.confidence;
   card.margin = ranked.margin;
@@ -138,17 +227,26 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
     record: c.candidate,
   }));
 
-  // 7. Populate fields, each with its own provenance.
-  if (signals.number) card.fields.number = extracted(signals.number.value, 'ocr', clamp(recognised.confidence), signals.number.raw);
-  if (signals.name) card.fields.name = extracted(signals.name.value, 'ocr', clamp(recognised.confidence * 0.9), signals.name.raw);
-  if (signals.variant) card.fields.variant = extracted(signals.variant.value, 'ocr', clamp(recognised.confidence), signals.variant.raw);
+  // 4. Populate fields, each with its own provenance.
+  if (signals.number) card.fields.number = extracted(signals.number.value, 'ocr', clamp(reading.bottomConfidence), signals.number.raw);
+  if (signals.name) card.fields.name = extracted(signals.name.value, 'ocr', clamp(reading.top.confidence * 0.9), signals.name.raw);
+  if (signals.variant) card.fields.variant = extracted(signals.variant.value, 'ocr', clamp(reading.confidence), signals.variant.raw);
   if (signals.language) card.fields.language = extracted(signals.language.value, 'ocr', 0.8, signals.language.raw);
   if (signals.year) card.fields.year = extracted(signals.year.value, 'ocr', 0.85, signals.year.raw);
 
   if (ranked.best) {
     const b = ranked.best;
     const c = ranked.confidence;
-    // Database values overwrite OCR only where OCR found nothing, so a printed
+
+    // OCR spells a name however it managed to read it ("Dialgawes"). When the
+    // match judged the names to agree, the database's spelling is the card's
+    // name, and what was actually read stays on record as the evidence.
+    const nameAgreement = ranked.candidates[0]?.agreements?.name ?? 0;
+    if (b.name && signals.name && nameAgreement >= 0.75 && signals.name.value !== b.name) {
+      card.fields.name = extracted(b.name, 'db_match', clamp(c), `${b.id} (read as “${signals.name.value}”)`);
+    }
+
+    // Other database values fill only what OCR found nothing for, so a printed
     // value the user can see on the card is never replaced behind their back.
     fill(card, 'name', b.name, c, b.id);
     fill(card, 'number', b.number, c, b.id);

@@ -52,17 +52,19 @@ exists only to stay honest about that.
 ## How it works
 
 ```
-image → quality check → crop → OCR → signals → card database → rank → confidence
+image → quality → find card → straighten → read name & number → card database → rank → confidence
 ```
 
 | Step | Where | What it does |
 |---|---|---|
 | Quality check | browser | blur, darkness, glare, size — warns with advice, never blocks |
-| Crop | browser | finds the card against a plainer background |
-| OCR | browser, Web Worker | Tesseract.js, English + German |
-| Signals | browser | card number, year, copyright, variant terms, language, name |
-| Lookup | TCGdex | free, open, no key, multilingual |
+| Find card | browser | finds the card on the table by colour and by texture, and measures its tilt |
+| Straighten | browser | crops and rotates from the full-resolution photo, so small print keeps its detail |
+| OCR | browser, Web Workers | Tesseract.js, English + German, on the name strip and the two bottom corners only |
+| Signals | browser | card number, name, HP, year, variant terms, language |
+| Lookup | TCGdex | free, open, no key, multilingual; by number and set size, or by name narrowed by number and HP |
 | Ranking | browser | weighted signal agreement, with a margin check |
+| Second opinion | browser | a reading that is not confident is repeated with a different framing before you are asked |
 
 Nothing is populated without evidence. Every identification value carries where
 it came from, how confident we are, and the exact text it was read from:
@@ -142,8 +144,10 @@ Worth knowing before you scan 500 cards:
 - **No pricing.** Identification and valuation are deliberately separate
   systems; pricing is not implemented rather than implemented badly.
 - **Condition is yours.** The app will not guess condition from a photo, ever.
-- **Accuracy is unmeasured.** There is no labelled fixture set yet, so the app
-  makes no accuracy claim. See `docs/testing.md`.
+- **Accuracy on real photos is unmeasured.** A test on synthetic photos shows the
+  right card found or offered far more often than before, and never confidently
+  wrong, but that is not a promise about your photos. The app makes no accuracy
+  claim. See `docs/testing.md`.
 - **Storage is local.** Clearing site data clears your batches. Export to keep
   anything you care about.
 
@@ -155,6 +159,7 @@ Worth knowing before you scan 500 cards:
 npm test     # unit tests, zero dependencies
 npm run check  # import graph, unsafe innerHTML, missing references
 node test/smoke.mjs   # browser smoke + pipeline E2E (needs Playwright)
+node tools/accuracy.mjs   # scan accuracy on synthetic photos (Playwright + network)
 ```
 
 The smoke test drives a real browser: it boots the app, walks every view,

@@ -20,6 +20,7 @@ import {
   cardTypeOf, isGraded, ebayCardValues, graderId, gradeId, ungradedConditionId,
   starterTemplate, formatPrice,
 } from '../ebay.js';
+import { rangeIds, pruneSelection, selectionState } from '../selection.js';
 
 // --- application state ----------------------------------------------------
 
@@ -46,11 +47,21 @@ const app = {
     action: 'VerifyAdd', format: 'FixedPrice', duration: 'GTC', mark: '.', bom: true,
     cardType: '', condition: '', price: '',   // filled in only for cards that have none
   },
+  selected: new Set(),   // card ids ticked in the cards table
+  anchorId: null,        // last ticked row: where a shift-click range starts
+  confirmDelete: false,  // the bulk bar is asking "are you sure?"
 };
 
 const view = document.getElementById('view');
 const tabs = document.getElementById('tabs');
 const picker = document.getElementById('filepicker');
+
+// The top bar is sticky and wraps on narrow screens, so publish its real height
+// for anything that has to sit just beneath it.
+const topbar = document.querySelector('.topbar');
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--topbar-h', `${topbar.offsetHeight}px`);
+}).observe(topbar);
 
 // --- boot -----------------------------------------------------------------
 
@@ -73,6 +84,7 @@ async function init() {
   app.titleTemplate = (await store.setting('titleTemplate')) ?? DEFAULT_TEMPLATE;
   app.provider.language = (await store.setting('language')) ?? 'en';
   app.ebay = { ...app.ebay, ...((await store.setting('ebay')) ?? {}) };
+  await store.sweepOrphanBlobs().catch(() => {}); // housekeeping must never stop the app starting
   await loadCards();
   render();
   wireGlobalKeys();
@@ -81,6 +93,15 @@ async function init() {
 async function loadCards() {
   app.cards = await store.all('cards', 'projectId', app.project.id);
   app.cards.sort((a, b) => a.createdAt - b.createdAt);
+  app.selected = pruneSelection(app.selected, app.cards.map((c) => c.id));
+}
+
+/** Remove cards and their photos, and release the object URLs that pointed at them. */
+async function deleteCards(ids) {
+  const { removed, blobIds } = await store.removeCards(ids);
+  for (const id of blobIds) app.urls.release(id);
+  await loadCards();
+  return removed;
 }
 
 async function createProject(name) {
@@ -355,9 +376,12 @@ const COLUMNS = [
   { key: 'year', label: 'Year' },
 ];
 
+const PAGE = 100;
+
 function viewCards() {
   const c = counts();
   const list = visibleCards();
+  app.selected = pruneSelection(app.selected, list.map((x) => x.id));
 
   const filters = [
     ['all', 'All', c.all],
@@ -404,16 +428,143 @@ function viewCards() {
 
 function renderTable() {
   const host = document.getElementById('tablehost');
-  if (host) mount(host, cardTable(visibleCards()));
+  if (!host) return;
+  const list = visibleCards();
+  app.selected = pruneSelection(app.selected, list.map((x) => x.id));
+  mount(host, cardTable(list));
+}
+
+// --- selection ------------------------------------------------------------
+
+function pick(e, id, shownIds) {
+  const op = e.target.checked ? 'add' : 'delete';
+  const ids = e.shiftKey && app.anchorId ? rangeIds(shownIds, app.anchorId, id) : [id];
+  for (const x of ids) app.selected[op](x);
+  app.anchorId = id;
+  app.confirmDelete = false;
+  syncSelectionUi();
+}
+
+function clearSelection() {
+  app.selected.clear();
+  app.anchorId = null;
+  app.confirmDelete = false;
+  syncSelectionUi();
+  document.getElementById('selectall')?.focus();
+}
+
+/** Copy the selected cards as tab-separated rows, in the order shown on screen. */
+function copySelected() {
+  const rows = visibleCards().filter((c) => app.selected.has(c.id));
+  copyText(
+    rows.map((c) => COLUMNS.map((col) => valueOf(c, col.key) ?? '').join('\t')).join('\n'),
+    `Copied ${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`,
+  );
+}
+
+async function deleteSelected() {
+  const ids = [...app.selected];
+  app.confirmDelete = false;
+  try {
+    const removed = await deleteCards(ids);
+    app.selected.clear();
+    app.anchorId = null;
+    render();
+    toast(`Deleted ${removed} ${removed === 1 ? 'card' : 'cards'}`);
+  } catch {
+    syncSelectionUi();
+    toast('Something went wrong deleting those cards. Please try again.');
+  }
+}
+
+/**
+ * Update ticks, row highlights and the action bar in place. Re-rendering the
+ * table would drop keyboard focus from the checkbox the user just pressed.
+ */
+function syncSelectionUi() {
+  const host = document.getElementById('selbar-host');
+  if (!host) return;
+  const rows = [...document.querySelectorAll('#tablehost tbody tr[data-id]')];
+  for (const tr of rows) {
+    const on = app.selected.has(tr.dataset.id);
+    tr.classList.toggle('selected', on);
+    tr.querySelector('.selbox').checked = on;
+  }
+  const all = document.getElementById('selectall');
+  if (all) {
+    const s = selectionState(app.selected, rows.map((tr) => tr.dataset.id));
+    all.checked = s.all;
+    all.indeterminate = s.some;
+  }
+  mount(host, selectionBar(visibleCards()));
+}
+
+function selectionBar(list) {
+  const n = app.selected.size;
+  if (!n) return null;
+
+  if (app.confirmDelete) {
+    return h('div', { class: 'selbar danger', role: 'group', 'aria-label': 'Confirm delete' },
+      h('span', {}, `Delete ${n} ${n === 1 ? 'card and its photo' : 'cards and their photos'}? This cannot be undone.`),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn small danger', id: 'confirm-delete', onClick: deleteSelected }, icon('trash', 13), `Delete ${n}`),
+      h('button', {
+        class: 'btn small',
+        onClick: () => { app.confirmDelete = false; syncSelectionUi(); document.getElementById('bulk-delete')?.focus(); },
+      }, 'Cancel'),
+    );
+  }
+
+  // The header ticks only the rows on screen. When every one of those is ticked
+  // and more cards match, offer the rest — the user always sees the count first.
+  const shownIds = list.slice(0, PAGE).map((c) => c.id);
+  const offerAll = list.length > PAGE && n < list.length && selectionState(app.selected, shownIds).all;
+
+  return h('div', { class: 'selbar', role: 'group', 'aria-label': 'Selected cards' },
+    h('strong', {}, `${n} selected`),
+    offerAll
+      ? h('button', {
+          class: 'btn small ghost',
+          onClick: () => {
+            for (const c of list) app.selected.add(c.id);
+            syncSelectionUi();
+            document.getElementById('bulk-delete')?.focus();
+          },
+        }, `Select all ${list.length}`)
+      : null,
+    h('div', { class: 'spacer' }),
+    h('button', { class: 'btn small', onClick: copySelected }, icon('copy', 13), 'Copy'),
+    h('button', {
+      class: 'btn small danger', id: 'bulk-delete',
+      onClick: () => { app.confirmDelete = true; syncSelectionUi(); document.getElementById('confirm-delete')?.focus(); },
+    }, icon('trash', 13), 'Delete'),
+    h('button', { class: 'btn small ghost', onClick: clearSelection }, 'Clear'),
+  );
 }
 
 function cardTable(list) {
   // Render a window of rows. A DOM node per card at 1,000 cards is its own
   // outage (§4), so long lists page rather than rendering whole.
-  const PAGE = 100;
   const shown = list.slice(0, PAGE);
+  const shownIds = shown.map((c) => c.id);
+
+  const selectAll = h('input', {
+    type: 'checkbox', class: 'selbox', id: 'selectall',
+    'aria-label': 'Select all shown cards',
+    onChange: (e) => {
+      const op = e.target.checked ? 'add' : 'delete';
+      for (const id of shownIds) app.selected[op](id);
+      app.anchorId = null;
+      app.confirmDelete = false;
+      syncSelectionUi();
+    },
+  });
+  const state = selectionState(app.selected, shownIds);
+  selectAll.checked = state.all;
+  selectAll.indeterminate = state.some;
 
   const head = h('tr', {},
+    h('th', { scope: 'col', class: 'selcol' }, selectAll),
     h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Image')),
     ...COLUMNS.map((col) => h('th', { scope: 'col' },
       h('button', {
@@ -435,12 +586,27 @@ function cardTable(list) {
     h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Actions')),
   );
 
-  const body = shown.map((card) => {
+  const body = shown.map((card, i) => {
     const b = band(card.confidence, card.margin);
     const img = h('img', { class: 'thumb', alt: '', loading: 'lazy' });
     app.urls.urlFor(card.images.thumb).then((u) => { if (u) img.src = u; });
 
-    return h('tr', { class: card.flags.length ? 'flagged' : '' },
+    // The row number keeps the name unique for screen readers when several
+    // cards are unidentified.
+    const name = valueOf(card, 'name');
+    const box = h('input', {
+      type: 'checkbox', class: 'selbox',
+      'aria-label': `Select card ${i + 1}${name ? `: ${name}` : ''}`,
+      onClick: (e) => pick(e, card.id, shownIds),
+    });
+    const picked = app.selected.has(card.id);
+    box.checked = picked;
+
+    return h('tr', {
+      class: [card.flags.length ? 'flagged' : '', picked ? 'selected' : ''].filter(Boolean).join(' '),
+      dataset: { id: card.id },
+    },
+      h('td', { class: 'selcol' }, box),
       h('td', {}, img),
       ...COLUMNS.map((col) => h('td', {},
         editable(valueOf(card, col.key), async (v) => {
@@ -467,6 +633,7 @@ function cardTable(list) {
   });
 
   return h('div', {},
+    h('div', { id: 'selbar-host', 'aria-live': 'polite' }, selectionBar(list)),
     h('div', { class: 'tablewrap' },
       h('table', {},
         h('caption', { class: 'sr-only' }, `${list.length} cards`),
@@ -504,8 +671,8 @@ function duplicatePanel() {
         onClick: async () => {
           const { keep, remove } = mergeToQuantity(g.cards);
           await store.put('cards', keep);
-          await Promise.all(remove.map((id) => store.remove('cards', id)));
-          await loadCards(); render();
+          await deleteCards(remove);
+          render();
           toast(`Merged into one listing, quantity ${keep.user.quantity}`);
         },
       }, `Keep 1 × ${g.count}`),
@@ -624,8 +791,8 @@ function viewReview() {
           h('button', { class: 'btn', onClick: () => step(list, 1) }, 'Skip'),
           h('button', {
             class: 'btn danger', onClick: async () => {
-              await store.remove('cards', card.id);
-              await loadCards(); render(); toast('Card removed');
+              await deleteCards([card.id]);
+              render(); toast('Card removed');
             },
           }, icon('trash', 14), 'Delete'),
           h('div', { class: 'spacer' }),
@@ -788,9 +955,24 @@ function step(list, delta) {
 
 function wireGlobalKeys() {
   document.addEventListener('keydown', (e) => {
-    if (app.view !== 'review') return;
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    const el = document.activeElement;
+    const typing = el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
+      || (el.tagName === 'INPUT' && el.type !== 'checkbox'));
+
+    // Esc backs out of a delete prompt first, then clears the selection.
+    if (app.view === 'cards' && e.key === 'Escape' && !typing && (app.selected.size || app.confirmDelete)) {
+      e.preventDefault();
+      if (app.confirmDelete) {
+        app.confirmDelete = false;
+        syncSelectionUi();
+        document.getElementById('bulk-delete')?.focus();
+      } else {
+        clearSelection();
+      }
+      return;
+    }
+
+    if (app.view !== 'review' || typing || el?.tagName === 'INPUT') return;
 
     const list = reviewList();
     if (!list.length) return;
@@ -802,7 +984,7 @@ function wireGlobalKeys() {
     else if (e.key.toLowerCase() === 'p') { e.preventDefault(); step(list, -1); }
     else if (e.key.toLowerCase() === 'd') {
       e.preventDefault();
-      store.remove('cards', card.id).then(loadCards).then(() => { render(); toast('Card removed'); });
+      deleteCards([card.id]).then(() => { render(); toast('Card removed'); });
     }
   });
 }

@@ -218,6 +218,23 @@ tbody tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--medium); }
   background: var(--surface-2); border: 1px solid var(--border); display: block;
 }
 
+/* --- selection ----------------------------------------------------------- */
+
+.selcol { width: 1%; padding-right: 4px !important; }
+.selbox { width: 17px; height: 17px; margin: 0; cursor: pointer; accent-color: var(--accent); display: block; }
+.selcol { user-select: none; }
+tbody tr.selected, tbody tr.selected:hover { background: var(--accent-soft); }
+
+/* Sticks just under the top bar so the actions stay reachable down a long list. */
+#selbar-host { position: sticky; top: calc(var(--topbar-h, 56px) + 8px); z-index: 10; }
+.selbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--accent-soft); box-shadow: var(--shadow);
+}
+.selbar.danger { background: var(--low-soft); border-color: var(--low); }
+
 .cellval { display: inline-flex; align-items: center; gap: 6px; }
 .cellval .missing { color: var(--text-3); font-style: italic; }
 .copy {

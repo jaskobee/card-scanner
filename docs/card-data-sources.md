@@ -32,6 +32,28 @@ The set total printed on a card (`/102`) resolves to a set, which is the
 strongest identification path we have. Name search is the fallback and needs
 the number to disambiguate reprints.
 
+What the API actually does, checked against `api.tcgdex.net` on 2026-09-19 —
+several of these differ from what one would assume:
+
+- The set **list** carries only `id`, `name` and `cardCount`. The **release year
+  and series exist only on a set's own page**, so they are fetched once per set
+  and cached: a batch drawn from twenty sets makes twenty such requests.
+- A **card's own `set` stub has no release date either.**
+- `cards?name=like:x` is a substring match, returned in id order rather than by
+  relevance. "Charizard" is 126 printings; taking the first few finds the wrong
+  ones. Adding `localId` (21) and `hp` (6) narrows it, but `localId` is *also* a
+  substring match — `1` finds `14` and `111` — so results are filtered to the
+  exact card number afterwards.
+- A garbled name such as `Dialgawes` returns nothing at all, while `Dialga`
+  returns 28, so a name that finds nothing is retried with up to three characters
+  trimmed.
+- `pagination:page` and `pagination:itemsPerPage` work, and keep a broad query
+  from downloading thousands of records.
+- `official` is the total printed on the card; `total` includes secret rares.
+
+Any failure other than a 404 is thrown, not swallowed, so the job queue retries
+it and a real outage trips the circuit breaker.
+
 ## Evaluated, not yet implemented
 
 | Source | Game | Key | Notes |

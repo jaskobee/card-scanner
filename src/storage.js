@@ -85,11 +85,70 @@ export async function removeWhere(store, indexName, indexValue) {
   return rows.length;
 }
 
+export async function keys(store) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const r = tx(db, store, 'readonly').getAllKeys();
+    r.onsuccess = () => resolve(r.result ?? []);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+/**
+ * Delete cards together with their photos, in one transaction so a crash can
+ * never leave a card without its images or images without a card. Removing only
+ * the record would leave every full-resolution original behind in the browser.
+ * Returns the removed image ids so the caller can release their object URLs.
+ */
+export async function removeCards(ids) {
+  const db = await open();
+  const cards = (await Promise.all(ids.map((id) => get('cards', id)))).filter(Boolean);
+  const blobIds = cards.flatMap((c) => Object.values(c.images ?? {}).filter(Boolean));
+  await new Promise((resolve, reject) => {
+    const t = db.transaction(['cards', 'blobs'], 'readwrite');
+    for (const c of cards) t.objectStore('cards').delete(c.id);
+    for (const id of blobIds) t.objectStore('blobs').delete(id);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+  return { removed: cards.length, blobIds };
+}
+
 // --- blobs ----------------------------------------------------------------
 // Images live in their own store so card records stay small and quick to scan.
 
-export async function putBlob(id, blob) { await put('blobs', { id, blob }); return id; }
+export async function putBlob(id, blob) { await put('blobs', { id, blob, at: Date.now() }); return id; }
 export async function getBlob(id) { return (await get('blobs', id))?.blob ?? null; }
+
+const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove photos whose card no longer exists — left behind by earlier versions
+ * that deleted only the card record, or by a tab closed mid-scan. Photos saved
+ * within the last day are kept: another tab may be part-way through a scan and
+ * not have written its card yet. Returns how many were removed.
+ */
+export async function sweepOrphanBlobs(now = Date.now()) {
+  const db = await open();
+  const live = new Set(await keys('cards'));
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('blobs', 'readwrite');
+    let removed = 0;
+    const req = t.objectStore('blobs').openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) return;
+      const { id, at } = cur.value;
+      const settled = !at || now - at > ORPHAN_GRACE_MS;
+      if (settled && !live.has(String(id).split(':')[0])) { cur.delete(); removed++; }
+      cur.continue();
+    };
+    t.oncomplete = () => resolve(removed);
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
 
 /**
  * Object URLs leak until revoked, and 500 of them is real memory. Hand them out

@@ -1,7 +1,7 @@
 // Candidate scoring. See CLAUDE.md §2.1, §3.
 // We rank candidates and report the margin. We never silently pick a winner.
 
-import { similarity, fold } from './normalize.js';
+import { similarity, fold, containsFuzzy } from './normalize.js';
 
 /**
  * Signal weights. An exact printed identifier is far more discriminating than
@@ -12,6 +12,7 @@ export const WEIGHTS = {
   name: 2.0,
   set: 1.5,
   year: 1.0,
+  hp: 0.8,
   language: 0.5,
   variant: 0.5,
 };
@@ -39,8 +40,12 @@ export function scoreCandidate(signals, candidate) {
     let agreement;
     if (field === 'number') {
       agreement = compareNumbers(observed, expected);
-    } else if (field === 'year') {
+    } else if (field === 'year' || field === 'hp') {
       agreement = Number(observed) === Number(expected) ? 1 : 0;
+    } else if (field === 'name' && signals.nameText) {
+      // The name line carries junk around the name; look for the candidate's
+      // name inside it as well as comparing the picked name directly.
+      agreement = Math.max(similarity(observed, expected), containsFuzzy(signals.nameText, expected));
     } else if (field === 'language') {
       agreement = fold(observed) === fold(expected) ? 1 : 0;
     } else {
@@ -124,6 +129,9 @@ export function rankCandidates(signals, candidates, opts = {}) {
 export function fieldFlags(signals, best) {
   const flags = [];
   for (const [field, agreement] of Object.entries(best.agreements)) {
+    // HP corroborates a match but is neither listed nor exported, so a misread
+    // one is not a field the user needs to fix.
+    if (field === 'hp') continue;
     if (agreement < 0.75) flags.push(field);
   }
   // Variant is first-class (§5): unobserved variant on a card whose candidate
