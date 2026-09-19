@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card Scanner</title>
+<meta name="description" content="Turn a pile of trading cards into an eBay-ready listing file. Runs entirely in your browser.">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🃏</text></svg>">
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+        <rect x="3" y="2" width="13" height="18" rx="2"/><path d="M8 20h9a2 2 0 0 0 2-2V6"/>
+      </svg>
+      <h1>Card Scanner</h1>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections"></nav>
+  </header>
+
+  <main>
+    <div class="wrap" id="view" role="region" aria-live="polite"></div>
+  </main>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="filepicker" accept="image/*" multiple hidden aria-label="Choose card images" tabindex="-1">
+
+<script type="module" src="src/ui/app.js"></script>
+<noscript>
+  <p style="padding:24px">Card Scanner needs JavaScript. Everything runs in your browser — no images are uploaded anywhere.</p>
+</noscript>
+</body>
+</html>

@@ -1,0 +1,902 @@
+// Card Scanner — application shell.
+// Zero build step: this is an ES module the browser runs directly.
+
+import { h, mount, clear, icon, toast, copyText, valueCell, editable, confidenceBadge, formatDuration } from './dom.js';
+import * as store from '../storage.js';
+import { JobQueue, JOB } from '../queue.js';
+import { OcrPool } from '../ocr.js';
+import { PokemonTcgdexProvider } from '../providers/pokemon-tcgdex.js';
+import { processImage } from '../pipeline.js';
+import { newCard, band, correct, valueOf, isAutoAcceptable, STATE, IDENTIFICATION_FIELDS, cryptoId } from '../model.js';
+import { findDuplicates, mergeToQuantity } from '../dupes.js';
+import { renderTitle, DEFAULT_TEMPLATE, EBAY_TITLE_LIMIT } from '../title.js';
+import {
+  toCsv, parseTemplate, suggestMapping, buildTemplateRows, validateRows,
+  TEXT_SAFE_FIELDS, MISSING,
+} from '../csv.js';
+import { ADVICE } from '../imagequality.js';
+
+// --- application state ----------------------------------------------------
+
+const app = {
+  view: 'upload',
+  project: null,
+  projects: [],
+  cards: [],
+  filter: 'all',
+  search: '',
+  sort: { key: 'createdAt', dir: 'asc' },
+  reviewIndex: 0,
+  queue: null,
+  ocr: new OcrPool(),
+  provider: new PokemonTcgdexProvider({ language: 'en' }),
+  fastScan: true,
+  titleTemplate: DEFAULT_TEMPLATE,
+  template: null,      // parsed eBay template
+  mapping: {},
+  urls: new store.UrlCache(),
+  progress: null,
+};
+
+const view = document.getElementById('view');
+const tabs = document.getElementById('tabs');
+const picker = document.getElementById('filepicker');
+
+// --- boot -----------------------------------------------------------------
+
+init().catch((err) => {
+  mount(view, h('div', { class: 'panel notice err' },
+    h('h3', {}, 'Card Scanner could not start'),
+    h('p', {}, err.message),
+    h('p', { class: 'tiny muted' }, 'Your browser may be blocking local storage. Private windows sometimes do.'),
+  ));
+});
+
+async function init() {
+  app.projects = await store.all('projects');
+  if (app.projects.length === 0) {
+    app.project = await createProject('My first batch');
+  } else {
+    const lastId = await store.setting('lastProject');
+    app.project = app.projects.find((p) => p.id === lastId) ?? app.projects[0];
+  }
+  app.titleTemplate = (await store.setting('titleTemplate')) ?? DEFAULT_TEMPLATE;
+  app.provider.language = (await store.setting('language')) ?? 'en';
+  await loadCards();
+  render();
+  wireGlobalKeys();
+}
+
+async function loadCards() {
+  app.cards = await store.all('cards', 'projectId', app.project.id);
+  app.cards.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+async function createProject(name) {
+  const p = { id: cryptoId(), name, createdAt: Date.now() };
+  await store.put('projects', p);
+  app.projects.push(p);
+  await store.setting('lastProject', p.id);
+  return p;
+}
+
+// --- derived --------------------------------------------------------------
+
+const counts = () => {
+  const c = { all: app.cards.length, review: 0, ready: 0, failed: 0 };
+  for (const card of app.cards) {
+    if (card.state === STATE.NEEDS_REVIEW) c.review++;
+    else if (card.state === STATE.FAILED) c.failed++;
+    else c.ready++;
+  }
+  c.duplicates = findDuplicates(app.cards, valueOf).reduce((n, g) => n + g.count, 0);
+  return c;
+};
+
+function visibleCards() {
+  let list = [...app.cards];
+  if (app.filter === 'review') list = list.filter((c) => c.state === STATE.NEEDS_REVIEW);
+  else if (app.filter === 'ready') list = list.filter((c) => c.state !== STATE.NEEDS_REVIEW && c.state !== STATE.FAILED);
+  else if (app.filter === 'failed') list = list.filter((c) => c.state === STATE.FAILED);
+  else if (app.filter === 'duplicates') {
+    const ids = new Set(findDuplicates(app.cards, valueOf).flatMap((g) => g.cards.map((c) => c.id)));
+    list = list.filter((c) => ids.has(c.id));
+  }
+
+  const q = app.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter((c) =>
+      IDENTIFICATION_FIELDS.some((f) => String(valueOf(c, f) ?? '').toLowerCase().includes(q)),
+    );
+  }
+
+  const { key, dir } = app.sort;
+  const sign = dir === 'asc' ? 1 : -1;
+  list.sort((a, b) => {
+    const va = key === 'confidence' ? a.confidence : key === 'createdAt' ? a.createdAt : String(valueOf(a, key) ?? '');
+    const vb = key === 'confidence' ? b.confidence : key === 'createdAt' ? b.createdAt : String(valueOf(b, key) ?? '');
+    if (va < vb) return -1 * sign;
+    if (va > vb) return 1 * sign;
+    return 0;
+  });
+  return list;
+}
+
+// --- render ---------------------------------------------------------------
+
+function render() {
+  renderTabs();
+  const views = { upload: viewUpload, scan: viewScan, cards: viewCards, review: viewReview, export: viewExport };
+  mount(view, (views[app.view] ?? viewUpload)());
+}
+
+function renderTabs() {
+  const c = counts();
+  const defs = [
+    ['upload', 'Upload', null],
+    ['cards', 'Cards', c.all],
+    ['review', 'Review', c.review],
+    ['export', 'Export', null],
+  ];
+  mount(tabs, defs.map(([key, label, count]) =>
+    h('button', {
+      class: 'tab', role: 'tab', 'aria-selected': String(app.view === key),
+      onClick: () => go(key),
+    }, label, count ? h('span', { class: 'count' }, String(count)) : null),
+  ));
+}
+
+function go(v) {
+  app.view = v;
+  if (v === 'review') app.reviewIndex = 0;
+  render();
+}
+
+// --- upload view ----------------------------------------------------------
+
+function viewUpload() {
+  const zone = h('div', {
+    class: 'dropzone',
+    onDragover: (e) => { e.preventDefault(); zone.classList.add('over'); },
+    onDragleave: () => zone.classList.remove('over'),
+    onDrop: (e) => {
+      e.preventDefault();
+      zone.classList.remove('over');
+      const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
+      if (files.length) startBatch(files);
+      else toast('Those files are not images');
+    },
+  },
+    h('h2', {}, 'Drop your card photos here'),
+    h('p', { class: 'muted' }, 'One card per photo. Front only is enough.'),
+    h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '16px' } },
+      h('button', { class: 'btn primary', onClick: () => picker.click() }, icon('upload'), 'Choose images'),
+    ),
+    h('p', { class: 'tiny muted', style: { marginTop: '14px' } }, 'JPG · PNG · WEBP · HEIC'),
+    h('div', { class: 'steps' },
+      h('span', {}, 'Upload'), h('span', {}, 'Scan'), h('span', {}, 'Review'), h('span', {}, 'Export'),
+    ),
+  );
+
+  picker.onchange = () => {
+    const files = [...picker.files];
+    picker.value = '';
+    if (files.length) startBatch(files);
+  };
+
+  return h('div', { class: 'narrow' },
+    zone,
+    h('div', { class: 'panel', style: { marginTop: '18px' } },
+      h('div', { class: 'row' },
+        h('div', {},
+          h('h3', {}, app.project.name),
+          h('p', { class: 'tiny muted', style: { margin: 0 } },
+            `${app.cards.length} cards · ${counts().review} need review`),
+        ),
+        h('div', { class: 'spacer' }),
+        h('select', {
+          class: 'field', style: { width: 'auto' },
+          'aria-label': 'Current batch',
+          onChange: async (e) => {
+            if (e.target.value === '__new') {
+              const name = prompt('Name this batch');
+              if (!name) { render(); return; }
+              app.project = await createProject(name);
+            } else {
+              app.project = app.projects.find((p) => p.id === e.target.value);
+              await store.setting('lastProject', app.project.id);
+            }
+            await loadCards();
+            render();
+          },
+        },
+          ...app.projects.map((p) => h('option', { value: p.id, selected: p.id === app.project.id }, p.name)),
+          h('option', { value: '__new' }, '+ New batch'),
+        ),
+      ),
+    ),
+
+    h('div', { class: 'panel' },
+      h('h3', {}, 'Scanning options'),
+      h('div', { class: 'row', style: { marginBottom: '10px' } },
+        h('label', { class: 'row', style: { gap: '8px' } },
+          h('input', {
+            type: 'checkbox', checked: app.fastScan,
+            onChange: (e) => { app.fastScan = e.target.checked; },
+          }),
+          h('span', {}, 'Fast Scan — accept confident matches automatically'),
+        ),
+      ),
+      h('div', { class: 'row' },
+        h('label', { class: 'lbl', for: 'lang' }, 'Card language'),
+        h('select', {
+          id: 'lang', class: 'field', style: { width: 'auto' },
+          onChange: async (e) => {
+            app.provider = new PokemonTcgdexProvider({ language: e.target.value });
+            await store.setting('language', e.target.value);
+          },
+        },
+          ...[['en', 'English'], ['de', 'Deutsch'], ['fr', 'Français'], ['es', 'Español'], ['it', 'Italiano'], ['ja', '日本語']]
+            .map(([v, l]) => h('option', { value: v, selected: app.provider.language === v }, l)),
+        ),
+      ),
+      h('p', { class: 'tiny muted', style: { marginTop: '12px', marginBottom: 0 } },
+        'Pokémon cards are supported today, using the open TCGdex database.'),
+    ),
+
+    h('div', { class: 'panel notice' },
+      h('strong', {}, 'Your photos stay on this device. '),
+      'Text recognition runs in your browser. Only the words read from a card — a name and a number — are sent to the card database to look it up. Your images are never uploaded.',
+    ),
+  );
+}
+
+// --- batch processing -----------------------------------------------------
+
+async function startBatch(files) {
+  app.view = 'scan';
+  app.progress = { total: files.length, startedAt: Date.now(), ocrReady: false };
+  render();
+
+  await app.ocr.init();
+  app.progress.ocrReady = true;
+
+  app.queue = new JobQueue({
+    concurrency: 3,
+    maxAttempts: 3,
+    worker: async (job) => {
+      const card = await processImage({
+        file: job.payload.file,
+        projectId: app.project.id,
+        provider: app.provider,
+        ocr: app.ocr,
+      });
+      if (app.fastScan && isAutoAcceptable(card)) card.state = STATE.VERIFIED;
+      await store.put('cards', card);
+      app.cards.push(card);
+      return card.id;
+    },
+  });
+
+  app.queue.addEventListener('progress', () => { if (app.view === 'scan') render(); renderTabs(); });
+  app.queue.addEventListener('breaker', () => { if (app.view === 'scan') render(); });
+  app.queue.addEventListener('idle', async () => {
+    if (app.view === 'scan') { app.view = 'cards'; await loadCards(); render(); }
+  });
+
+  files.forEach((file, i) => app.queue.add(`${Date.now()}-${i}`, { file }));
+  app.queue.run();
+}
+
+function viewScan() {
+  const q = app.queue;
+  const s = q ? q.stats : { total: app.progress?.total ?? 0, done: 0, succeeded: 0, failed: 0, progress: 0, etaMs: 0 };
+  const scanned = app.cards.filter((c) => c.state !== STATE.FAILED);
+  const high = scanned.filter((c) => band(c.confidence, c.margin).key === 'HIGH').length;
+  const needsReview = scanned.filter((c) => c.state === STATE.NEEDS_REVIEW).length;
+
+  return h('div', { class: 'narrow' },
+    h('div', { class: 'panel' },
+      h('h2', {}, app.progress?.ocrReady ? 'Scanning your cards' : 'Getting the text recogniser ready'),
+      h('p', { class: 'muted' }, app.progress?.ocrReady
+        ? `${s.done} of ${s.total} processed`
+        : 'This happens once and is then cached by your browser.'),
+      h('div', { class: 'bar' }, h('i', { style: { width: `${Math.round(s.progress * 100)}%` } })),
+
+      h('div', { class: 'statrow' },
+        h('div', { class: 'stat high' }, h('b', {}, String(high)), h('span', {}, 'Identified')),
+        h('div', { class: 'stat medium' }, h('b', {}, String(needsReview)), h('span', {}, 'Need review')),
+        h('div', { class: 'stat low' }, h('b', {}, String(s.failed)), h('span', {}, 'Failed')),
+        h('div', { class: 'stat' }, h('b', {}, formatDuration(s.etaMs)), h('span', {}, 'Remaining')),
+      ),
+
+      q?.breakerOpen
+        ? h('div', { class: 'notice err', style: { marginBottom: '12px' } },
+            h('strong', {}, 'We stopped scanning. '),
+            'The card database is not responding, so the rest of the batch would fail too. Your finished cards are safe.',
+            h('div', { class: 'row', style: { marginTop: '10px' } },
+              h('button', { class: 'btn small', onClick: () => { q.resume(); render(); } }, 'Try again'),
+            ))
+        : null,
+
+      h('div', { class: 'row' },
+        q && !q.paused
+          ? h('button', { class: 'btn', onClick: () => { q.pause(); render(); } }, 'Pause')
+          : h('button', { class: 'btn', onClick: () => { q?.resume(); render(); } }, 'Resume'),
+        h('button', { class: 'btn', onClick: () => { q?.cancel(); go('cards'); } }, 'Stop'),
+        h('div', { class: 'spacer' }),
+        h('button', { class: 'btn ghost', onClick: () => go('cards') }, 'View results so far'),
+      ),
+    ),
+    h('p', { class: 'tiny muted', style: { textAlign: 'center' } },
+      'You can leave this page open in the background. Progress is saved as it goes.'),
+  );
+}
+
+// --- cards table ----------------------------------------------------------
+
+const COLUMNS = [
+  { key: 'name', label: 'Name' },
+  { key: 'set', label: 'Set' },
+  { key: 'number', label: 'Number' },
+  { key: 'variant', label: 'Variant' },
+  { key: 'year', label: 'Year' },
+];
+
+function viewCards() {
+  const c = counts();
+  const list = visibleCards();
+
+  const filters = [
+    ['all', 'All', c.all],
+    ['review', 'Needs review', c.review],
+    ['ready', 'Ready', c.ready],
+    ['duplicates', 'Duplicates', c.duplicates],
+    ['failed', 'Failed', c.failed],
+  ];
+
+  return h('div', {},
+    h('div', { class: 'row', style: { marginBottom: '14px' } },
+      h('h2', {}, app.project.name),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn', onClick: () => go('upload') }, icon('upload'), 'Add more'),
+      c.review ? h('button', { class: 'btn primary', onClick: () => go('review') }, `Review ${c.review}`) : null,
+    ),
+
+    h('div', { class: 'row', style: { marginBottom: '12px' } },
+      ...filters.map(([key, label, n]) =>
+        h('button', {
+          class: `btn small ${app.filter === key ? 'primary' : 'ghost'}`,
+          onClick: () => { app.filter = key; render(); },
+        }, label, n ? ` (${n})` : ''),
+      ),
+      h('div', { class: 'spacer' }),
+      h('input', {
+        class: 'field', type: 'search', placeholder: 'Search cards…',
+        'aria-label': 'Search cards', value: app.search,
+        style: { width: '200px' },
+        onInput: (e) => { app.search = e.target.value; renderTable(); },
+      }),
+    ),
+
+    app.filter === 'duplicates' ? duplicatePanel() : null,
+
+    list.length === 0
+      ? h('div', { class: 'empty' },
+          h('h3', {}, app.cards.length ? 'Nothing matches that filter' : 'No cards yet'),
+          h('p', {}, app.cards.length ? 'Try a different filter or search.' : 'Upload some card photos to get started.'),
+        )
+      : h('div', { id: 'tablehost' }, cardTable(list)),
+  );
+}
+
+function renderTable() {
+  const host = document.getElementById('tablehost');
+  if (host) mount(host, cardTable(visibleCards()));
+}
+
+function cardTable(list) {
+  // Render a window of rows. A DOM node per card at 1,000 cards is its own
+  // outage (§4), so long lists page rather than rendering whole.
+  const PAGE = 100;
+  const shown = list.slice(0, PAGE);
+
+  const head = h('tr', {},
+    h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Image')),
+    ...COLUMNS.map((col) => h('th', { scope: 'col' },
+      h('button', {
+        onClick: () => {
+          app.sort = { key: col.key, dir: app.sort.key === col.key && app.sort.dir === 'asc' ? 'desc' : 'asc' };
+          renderTable();
+        },
+        'aria-label': `Sort by ${col.label}`,
+      }, col.label, app.sort.key === col.key ? (app.sort.dir === 'asc' ? ' ↑' : ' ↓') : ''),
+    )),
+    h('th', { scope: 'col' },
+      h('button', {
+        onClick: () => {
+          app.sort = { key: 'confidence', dir: app.sort.key === 'confidence' && app.sort.dir === 'asc' ? 'desc' : 'asc' };
+          renderTable();
+        },
+      }, 'Status', app.sort.key === 'confidence' ? (app.sort.dir === 'asc' ? ' ↑' : ' ↓') : ''),
+    ),
+    h('th', { scope: 'col' }, h('span', { class: 'sr-only' }, 'Actions')),
+  );
+
+  const body = shown.map((card) => {
+    const b = band(card.confidence, card.margin);
+    const img = h('img', { class: 'thumb', alt: '', loading: 'lazy' });
+    app.urls.urlFor(card.images.thumb).then((u) => { if (u) img.src = u; });
+
+    return h('tr', { class: card.flags.length ? 'flagged' : '' },
+      h('td', {}, img),
+      ...COLUMNS.map((col) => h('td', {},
+        editable(valueOf(card, col.key), async (v) => {
+          const updated = correct(card, col.key, v);
+          Object.assign(card, updated);
+          await store.put('cards', card);
+          renderTable(); renderTabs();
+        }, { label: col.label, placeholder: card.flags.includes(col.key) ? 'Needs review' : 'Add' }),
+        valueOf(card, col.key)
+          ? h('button', {
+              class: 'copy', type: 'button', 'aria-label': `Copy ${col.label}`,
+              onClick: (e) => { e.stopPropagation(); copyText(valueOf(card, col.key)); },
+            }, icon('copy', 13))
+          : null,
+      )),
+      h('td', {}, confidenceBadge(b, card.confidence)),
+      h('td', {},
+        h('button', {
+          class: 'btn small ghost', onClick: () => { openReviewFor(card.id); },
+          'aria-label': 'Open this card',
+        }, icon('edit', 13)),
+      ),
+    );
+  });
+
+  return h('div', {},
+    h('div', { class: 'tablewrap' },
+      h('table', {},
+        h('caption', { class: 'sr-only' }, `${list.length} cards`),
+        h('thead', {}, head),
+        h('tbody', {}, body),
+      ),
+    ),
+    list.length > PAGE
+      ? h('p', { class: 'tiny muted', style: { marginTop: '10px' } },
+          `Showing the first ${PAGE} of ${list.length}. Use search or a filter to narrow it down.`)
+      : null,
+    h('div', { class: 'row', style: { marginTop: '12px' } },
+      h('button', {
+        class: 'btn small', onClick: () => copyText(list.map((c) =>
+          COLUMNS.map((col) => valueOf(c, col.key) ?? '').join('\t')).join('\n'), `Copied ${list.length} rows`),
+      }, icon('copy', 13), 'Copy these as rows'),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn small primary', onClick: () => go('export') }, icon('download', 13), 'Export'),
+    ),
+  );
+}
+
+function duplicatePanel() {
+  const groups = findDuplicates(app.cards, valueOf);
+  if (!groups.length) return null;
+  return h('div', { class: 'panel', style: { marginBottom: '14px' } },
+    h('h3', {}, `${groups.length} possible duplicate${groups.length === 1 ? '' : 's'}`),
+    h('p', { class: 'tiny muted' }, 'Nothing is deleted automatically. Choose what happens to each group.'),
+    ...groups.slice(0, 20).map((g) => h('div', { class: 'row', style: { padding: '7px 0', borderTop: '1px solid var(--border)' } },
+      h('span', {}, `${valueOf(g.cards[0], 'name') ?? 'Unidentified'} · ${valueOf(g.cards[0], 'number') ?? '—'}`),
+      h('span', { class: 'tiny muted' }, `scanned ${g.count} times`),
+      h('div', { class: 'spacer' }),
+      h('button', {
+        class: 'btn small',
+        onClick: async () => {
+          const { keep, remove } = mergeToQuantity(g.cards);
+          await store.put('cards', keep);
+          await Promise.all(remove.map((id) => store.remove('cards', id)));
+          await loadCards(); render();
+          toast(`Merged into one listing, quantity ${keep.user.quantity}`);
+        },
+      }, `Keep 1 × ${g.count}`),
+      h('button', { class: 'btn small ghost', onClick: () => { app.search = valueOf(g.cards[0], 'name') ?? ''; app.filter = 'all'; render(); } }, 'Show'),
+    )),
+  );
+}
+
+// --- review ---------------------------------------------------------------
+
+function reviewList() {
+  return app.cards.filter((c) => c.state === STATE.NEEDS_REVIEW || c.flags.length);
+}
+
+function openReviewFor(id) {
+  const list = reviewList();
+  const i = list.findIndex((c) => c.id === id);
+  app.reviewIndex = i >= 0 ? i : 0;
+  if (i < 0) { app.singleCardId = id; }
+  app.view = 'review';
+  render();
+}
+
+function viewReview() {
+  const list = app.singleCardId
+    ? app.cards.filter((c) => c.id === app.singleCardId)
+    : reviewList();
+  app.singleCardId = null;
+
+  if (!list.length) {
+    return h('div', { class: 'empty' },
+      h('h3', {}, 'Nothing needs your attention'),
+      h('p', {}, 'Every card in this batch is identified and verified.'),
+      h('button', { class: 'btn primary', onClick: () => go('export') }, 'Go to export'),
+    );
+  }
+
+  const idx = Math.min(app.reviewIndex, list.length - 1);
+  const card = list[idx];
+  const b = band(card.confidence, card.margin);
+
+  const front = h('img', { class: 'big', alt: 'The card you uploaded' });
+  app.urls.urlFor(card.images.front).then((u) => { if (u) front.src = u; });
+
+  const ref = card.reference?.image
+    ? h('figure', { style: { margin: 0 } },
+        h('img', { class: 'big', src: card.reference.image, alt: 'The card we matched it to', loading: 'lazy' }),
+        h('figcaption', {}, 'Our match'))
+    : null;
+
+  return h('div', {},
+    h('div', { class: 'row', style: { marginBottom: '14px' } },
+      h('h2', {}, `Review ${idx + 1} of ${list.length}`),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn ghost', onClick: () => go('cards') }, 'Back to all cards'),
+    ),
+
+    h('div', { class: 'review' },
+      h('div', {},
+        ref
+          ? h('div', { class: 'refpair' },
+              h('figure', { style: { margin: 0 } }, front, h('figcaption', {}, 'Your photo')),
+              ref)
+          : front,
+
+        card.errors.length
+          ? h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+              ...card.errors.map((e) => {
+                const advice = ADVICE[e];
+                return advice
+                  ? h('div', {}, h('strong', {}, advice.title),
+                      h('ul', { style: { margin: '6px 0 0', paddingLeft: '18px' } },
+                        ...advice.hints.map((x) => h('li', { class: 'tiny' }, x))))
+                  : h('div', {}, String(e));
+              }))
+          : null,
+      ),
+
+      h('div', {},
+        h('div', { class: 'row', style: { marginBottom: '10px' } },
+          confidenceBadge(b, card.confidence),
+          h('span', { class: 'tiny muted' },
+            `${Math.round(card.confidence * 100)}% · margin ${Math.round(card.margin * 100)}%`),
+        ),
+
+        h('div', { class: 'fieldlist' },
+          ...[...COLUMNS, { key: 'manufacturer', label: 'Maker' }, { key: 'language', label: 'Language' }]
+            .map((col) => fieldRow(card, col)),
+          conditionRow(card),
+        ),
+
+        card.candidates.length > 1
+          ? h('div', {},
+              h('h3', { style: { marginTop: '18px' } }, 'Other possible matches'),
+              h('div', { class: 'alts' },
+                ...card.candidates.slice(0, 4).map((c) => h('button', {
+                  class: 'alt',
+                  onClick: () => applyCandidate(card, c),
+                },
+                  c.record.image ? h('img', { src: c.record.image, alt: '', loading: 'lazy' }) : h('span', {}, ''),
+                  h('span', {},
+                    h('div', {}, `${c.record.name ?? '—'} · ${c.record.number ?? '—'}`),
+                    h('div', { class: 'tiny muted' }, `${c.record.set ?? '—'}${c.record.year ? ` · ${c.record.year}` : ''}`),
+                  ),
+                  h('span', { class: 'mono tiny' }, `${Math.round(c.confidence * 100)}%`),
+                ))))
+          : null,
+
+        h('div', { class: 'row', style: { marginTop: '18px' } },
+          h('button', { class: 'btn primary', onClick: () => acceptCard(card, list) }, icon('check'), 'Accept'),
+          h('button', { class: 'btn', onClick: () => step(list, 1) }, 'Skip'),
+          h('button', {
+            class: 'btn danger', onClick: async () => {
+              await store.remove('cards', card.id);
+              await loadCards(); render(); toast('Card removed');
+            },
+          }, icon('trash', 14), 'Delete'),
+          h('div', { class: 'spacer' }),
+          h('button', { class: 'btn ghost small', onClick: () => step(list, -1) }, '← Previous'),
+          h('button', { class: 'btn ghost small', onClick: () => step(list, 1) }, 'Next →'),
+        ),
+
+        h('p', { class: 'tiny muted', style: { marginTop: '12px' } },
+          h('kbd', {}, 'Enter'), ' accept · ', h('kbd', {}, 'S'), ' skip · ',
+          h('kbd', {}, 'D'), ' delete · ', h('kbd', {}, 'N'), '/', h('kbd', {}, 'P'), ' next, previous'),
+      ),
+    ),
+  );
+}
+
+function fieldRow(card, col) {
+  const f = card.fields[col.key];
+  const flagged = card.flags.includes(col.key);
+  return h('div', { class: `fieldrow ${flagged ? 'flag' : ''}` },
+    h('span', { class: 'k' }, col.label),
+    h('span', { class: 'v' },
+      editable(valueOf(card, col.key), async (v) => {
+        Object.assign(card, correct(card, col.key, v));
+        await store.put('cards', card);
+        render(); renderTabs();
+      }, { label: col.label, placeholder: flagged ? 'Needs review' : 'Add' }),
+    ),
+    h('span', { class: 'row', style: { gap: '6px' } },
+      f?.value ? h('span', { class: 'src', title: f.evidence ? `Read as: ${f.evidence}` : '' }, f.source) : null,
+      valueOf(card, col.key)
+        ? h('button', {
+            class: 'copy', style: { opacity: 1 }, 'aria-label': `Copy ${col.label}`,
+            onClick: () => copyText(valueOf(card, col.key)),
+          }, icon('copy', 13))
+        : null,
+    ),
+  );
+}
+
+function conditionRow(card) {
+  // §5: condition is never inferred from an image. The user chooses it.
+  const options = ['', 'Near Mint', 'Excellent', 'Good', 'Played', 'Poor'];
+  return h('div', { class: 'fieldrow' },
+    h('span', { class: 'k' }, 'Condition'),
+    h('span', { class: 'v' },
+      h('select', {
+        class: 'field', 'aria-label': 'Condition',
+        onChange: async (e) => {
+          Object.assign(card, correct(card, 'condition', e.target.value));
+          await store.put('cards', card);
+        },
+      }, ...options.map((o) => h('option', { value: o, selected: card.user.condition === o }, o || 'Choose…'))),
+    ),
+    h('span', { class: 'src' }, 'you'),
+  );
+}
+
+async function applyCandidate(card, c) {
+  const r = c.record;
+  for (const [field, value] of Object.entries({
+    name: r.name, number: r.number, set: r.set, series: r.series,
+    year: r.year, manufacturer: r.manufacturer, game: r.game, language: r.language,
+  })) {
+    if (value != null) Object.assign(card, correct(card, field, value));
+  }
+  card.confidence = c.confidence;
+  card.reference = { image: r.image ?? null, id: r.id, availableVariants: r.availableVariants ?? [] };
+  card.flags = card.flags.filter((f) => f === 'variant');
+  await store.put('cards', card);
+  render();
+  toast('Match updated');
+}
+
+async function acceptCard(card, list) {
+  card.state = STATE.VERIFIED;
+  card.flags = [];
+  card.updatedAt = Date.now();
+  await store.put('cards', card);
+  const remaining = list.filter((c) => c.id !== card.id);
+  if (!remaining.length) { await loadCards(); go('cards'); toast('All reviewed'); return; }
+  app.reviewIndex = Math.min(app.reviewIndex, remaining.length - 1);
+  render(); renderTabs();
+}
+
+function step(list, delta) {
+  app.reviewIndex = (app.reviewIndex + delta + list.length) % list.length;
+  render();
+}
+
+function wireGlobalKeys() {
+  document.addEventListener('keydown', (e) => {
+    if (app.view !== 'review') return;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+    const list = reviewList();
+    if (!list.length) return;
+    const card = list[Math.min(app.reviewIndex, list.length - 1)];
+
+    if (e.key === 'Enter') { e.preventDefault(); acceptCard(card, list); }
+    else if (e.key.toLowerCase() === 's') { e.preventDefault(); step(list, 1); }
+    else if (e.key.toLowerCase() === 'n') { e.preventDefault(); step(list, 1); }
+    else if (e.key.toLowerCase() === 'p') { e.preventDefault(); step(list, -1); }
+    else if (e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      store.remove('cards', card.id).then(loadCards).then(() => { render(); toast('Card removed'); });
+    }
+  });
+}
+
+// --- export ---------------------------------------------------------------
+
+function cardValue(card, field) {
+  if (field === 'title') {
+    return renderTitle(app.titleTemplate, Object.fromEntries(
+      [...IDENTIFICATION_FIELDS, 'variant', 'condition', 'grade'].map((f) => [f, valueOf(card, f)]),
+    )).title;
+  }
+  return valueOf(card, field);
+}
+
+function viewExport() {
+  const preview = renderTitle(app.titleTemplate, {
+    year: 1999, manufacturer: 'Pokemon', set: 'Base Set', name: 'Charizard', number: '4/102', variant: 'Holo',
+  });
+
+  return h('div', { class: 'narrow' },
+    h('h2', { style: { marginBottom: '14px' } }, 'Export'),
+
+    h('div', { class: 'panel' },
+      h('h3', {}, 'Listing title'),
+      h('input', {
+        class: 'field', value: app.titleTemplate, 'aria-label': 'Title template',
+        onInput: async (e) => {
+          app.titleTemplate = e.target.value;
+          await store.setting('titleTemplate', app.titleTemplate);
+          render();
+        },
+      }),
+      h('p', { class: 'tiny muted', style: { marginTop: '8px' } },
+        'Available: ', h('span', { class: 'mono' }, '{year} {manufacturer} {set} {name} {number} {variant} {language} {condition} {grade}')),
+      h('div', { class: 'notice', style: { marginTop: '10px' } },
+        h('div', { class: 'mono tiny' }, preview.title),
+        h('div', { class: 'tiny muted', style: { marginTop: '4px' } },
+          `${preview.length} of ${EBAY_TITLE_LIMIT} characters${preview.truncated ? ' — this template overflows and will be trimmed' : ''}`),
+      ),
+    ),
+
+    h('div', { class: 'panel' },
+      h('h3', {}, 'Your eBay template'),
+      h('p', { class: 'tiny muted' },
+        'eBay’s columns differ by category and by country, so we use the template file from your own Seller Hub rather than guessing a format.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', onClick: () => pickTemplate() }, icon('upload', 14), 'Upload eBay template'),
+        app.template ? h('span', { class: 'tiny muted' }, `${app.template.columnCount} columns detected`) : null,
+      ),
+      app.template ? templateSummary() : null,
+    ),
+
+    h('div', { class: 'panel' },
+      h('h3', {}, 'Download'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', onClick: () => exportGeneric() }, icon('download', 14), 'Generic CSV'),
+        h('button', { class: 'btn', onClick: () => exportJson() }, icon('download', 14), 'JSON'),
+        app.template
+          ? h('button', { class: 'btn primary', onClick: () => exportTemplate() }, icon('download', 14), 'eBay CSV')
+          : null,
+      ),
+      h('p', { class: 'tiny muted', style: { marginTop: '10px', marginBottom: 0 } },
+        'Files are written as UTF-8 with a byte-order mark, so German characters survive in Excel. Card numbers such as 004/120 are quoted as text so they are not turned into dates.'),
+    ),
+  );
+}
+
+function templateSummary() {
+  const { mapping, unknownColumns } = suggestMapping(app.template.headers);
+  app.mapping = { ...mapping, ...app.mapping };
+
+  const rows = buildTemplateRows(app.cards, app.template, app.mapping, cardValue);
+  const v = validateRows(rows, app.template);
+
+  return h('div', { style: { marginTop: '14px' } },
+    h('div', { class: 'statrow' },
+      h('div', { class: 'stat' }, h('b', {}, String(app.template.columnCount)), h('span', {}, 'Columns')),
+      h('div', { class: 'stat high' }, h('b', {}, String(Object.keys(app.mapping).length)), h('span', {}, 'Filled by us')),
+      h('div', { class: 'stat medium' }, h('b', {}, String(unknownColumns.length)), h('span', {}, 'Left for you')),
+    ),
+
+    h('h3', { style: { marginTop: '14px' } }, 'Field mapping'),
+    ...Object.entries(app.mapping).map(([field, header]) =>
+      h('div', { class: 'maprow' },
+        h('span', {}, field),
+        h('span', { class: 'arrow' }, '→'),
+        h('select', {
+          class: 'field', 'aria-label': `Map ${field} to a column`,
+          onChange: (e) => {
+            if (e.target.value) app.mapping[field] = e.target.value;
+            else delete app.mapping[field];
+            render();
+          },
+        },
+          h('option', { value: '' }, '— not exported —'),
+          ...app.template.headers.map((x) => h('option', { value: x, selected: x === header }, x)),
+        ),
+      )),
+
+    unknownColumns.length
+      ? h('div', { class: 'notice', style: { marginTop: '12px' } },
+          h('strong', {}, 'We left these columns exactly as they came. '),
+          h('span', { class: 'tiny' }, unknownColumns.slice(0, 12).join(' · ')),
+          unknownColumns.length > 12 ? h('span', { class: 'tiny' }, ` and ${unknownColumns.length - 12} more`) : null)
+      : null,
+
+    v.ok
+      ? h('div', { class: 'notice', style: { marginTop: '12px' } },
+          `All ${v.total} listings have everything eBay requires.`)
+      : h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+          h('strong', {}, `${v.complete} of ${v.total} listings are complete.`),
+          h('div', { style: { marginTop: '8px' } },
+            ...v.issues.map((i) => h('div', { class: 'issue' },
+              h('b', {}, String(i.indexes.length)),
+              h('span', {}, `need ${i.header.replace(/\*/g, '')}`),
+            ))),
+          h('p', { class: 'tiny', style: { marginTop: '8px', marginBottom: 0 } },
+            'We mark these rather than guess them. Fill them in on the card, or export anyway and finish in eBay.')),
+  );
+}
+
+async function pickTemplate() {
+  const input = h('input', { type: 'file', accept: '.csv,.tsv,.txt', style: { display: 'none' } });
+  document.body.appendChild(input);
+  input.onchange = async () => {
+    const file = input.files[0];
+    input.remove();
+    if (!file) return;
+    try {
+      const text = await file.text();
+      app.template = parseTemplate(text);
+      app.mapping = suggestMapping(app.template.headers).mapping;
+      render();
+      toast(`${app.template.columnCount} columns detected`);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  input.click();
+}
+
+function download(filename, text, type = 'text/csv;charset=utf-8') {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportGeneric() {
+  const fields = [...IDENTIFICATION_FIELDS, 'variant', 'condition', 'quantity', 'sku', 'price'];
+  const headers = ['title', ...fields, 'confidence', 'status'];
+  const rows = app.cards.map((c) => {
+    const row = { title: cardValue(c, 'title'), confidence: c.confidence, status: c.state };
+    for (const f of fields) row[f] = valueOf(c, f) ?? '';
+    return row;
+  });
+  download(`${slug(app.project.name)}-cards.csv`, toCsv(headers, rows, { textColumns: TEXT_SAFE_FIELDS }));
+  toast(`Exported ${rows.length} cards`);
+}
+
+function exportJson() {
+  download(`${slug(app.project.name)}-cards.json`, JSON.stringify(app.cards, null, 2), 'application/json');
+  toast('Exported JSON');
+}
+
+function exportTemplate() {
+  const rows = buildTemplateRows(app.cards, app.template, app.mapping, cardValue);
+  const v = validateRows(rows, app.template);
+  if (!v.ok && !confirm(`${v.total - v.complete} listings are missing a required field and will say "${MISSING}". Export anyway?`)) return;
+
+  const csv = toCsv(app.template.headers, rows, {
+    delimiter: app.template.delimiter,
+    textColumns: app.template.headers.filter((hh) => /number|sku|label|serial|cert/i.test(hh)),
+  });
+  download(`${slug(app.project.name)}-ebay.csv`, csv);
+  toast(`Exported ${rows.length} listings`);
+}
+
+function slug(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'batch';
+}
