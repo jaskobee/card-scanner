@@ -35,10 +35,16 @@ const saveDir = arg('save', '');
 
 function loadPlaywright() {
   const require = createRequire(import.meta.url);
-  for (const c of [process.env.PLAYWRIGHT_PATH, 'playwright', '/usr/lib/node_modules/playwright'].filter(Boolean)) {
+  for (const c of [process.env.PLAYWRIGHT_PATH, 'playwright', 'playwright-core', '/usr/lib/node_modules/playwright'].filter(Boolean)) {
     try { return require(c); } catch { /* next */ }
   }
-  console.error('Playwright is not installed. Run: npm i -D playwright');
+  console.error([
+    'Playwright is not installed. This tool drives a real browser. Nothing here is added to package.json:',
+    '  npm i --no-save playwright-core                 # small; then point it at a browser you already have:',
+    '  CHROMIUM_PATH=/usr/bin/chromium node ' + process.argv[1].replace(process.cwd() + '/', ''),
+    'or let Playwright fetch its own browser (larger):',
+    '  npm i --no-save playwright && npx playwright install chromium',
+  ].join('\n'));
   process.exit(2);
 }
 
@@ -154,6 +160,15 @@ const bad = results.filter((r) => !r.nameOk).slice(0, 8);
 if (bad.length) {
   console.log('\nmisses:');
   for (const r of bad) console.log(`  ${r.id}/${r.condition}: wanted "${r.truth.name}", got ${JSON.stringify(r.got.name)}  (others: ${r.got.names.slice(1, 3).map((n) => JSON.stringify(n)).join(', ') || 'none'})`);
+}
+// The small print: manufacturer, product line and year, where the card carries them.
+const print = results.filter((r) => r.brandOk === false || r.productOk === false || r.yearOk === false).slice(0, 8);
+if (print.length) {
+  console.log('\nsmall print not read:');
+  for (const r of print) {
+    const lost = [r.brandOk === false && `maker ${JSON.stringify(r.got.manufacturer)}`, r.productOk === false && `product ${JSON.stringify(r.got.product)}`, r.yearOk === false && `year ${JSON.stringify(r.got.year)}`].filter(Boolean).join(', ');
+    console.log(`  ${r.id}/${r.condition}: wanted ${[r.truth.manufacturer, r.truth.product, r.truth.year].filter(Boolean).join(' / ')}, got ${lost}`);
+  }
 }
 // Right letters, wrong spaces ("JORDA NELLIS") count as found above but read badly on a listing.
 const spacing = results.filter((r) => r.nameOk && !r.nameSpaced).slice(0, 8);

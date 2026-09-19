@@ -134,14 +134,19 @@ print detail, so real photos are harder. The people are made up. Use it to compa
 one version of the reader with another and to find what breaks, never as a
 promise about real cards. Twenty cards is small: one card is five points.
 
-Measured 2026-09-19, the same 60 photos each time. "Before" is the strips alone,
+Measured 2026-09-20, the same 60 photos each time. "Before" is the strips alone,
 as shipped, which is what read a Bray Wyatt card as "GERI".
 
 | condition | name found, before → now | with the spaces right | maker | product | year |
 |---|---|---|---|---|---|
-| clean | 20% → 95% | 20% → 85% | 0% → 90% | 0% → 94% | 23% → 100% |
-| easy photo | 10% → 75% | 10% → 60% | 0% → 100% | 0% → 100% | 8% → 100% |
-| medium | 5% → 55% | 5% → 50% | 0% → 100% | 0% → 100% | 0% → 69% |
+| clean | 20% → 95% | 20% → 85% | 0% → 90% | 0% → 88% | 23% → 100% |
+| easy photo | 10% → 80% | 10% → 70% | 0% → 100% | 0% → 100% | 8% → 100% |
+| medium | 5% → 50% | 5% → 35% | 0% → 100% | 0% → 100% | 0% → 69% |
+
+The first version of the reader (2026-09-19) scored 95 / 75 / 55% on name found. The
+changes that followed the first real photos left clean level, raised easy, and cost
+medium (blurred) photos one card in name found and three in spacing. That trade was
+made knowingly: on real scans the exact name went from 1 of 5 to 4 of 5 (see below).
 
 What is still wrong, from the misses the tool lists: a name stacked over two
 lines comes out as its surname alone about half the time (`stacked-left` finds the
@@ -164,6 +169,20 @@ each came from and how sure the scanner was, the other names it considered, and
 every line of text it could read, biggest first. When a card scans badly, this
 shows whether the text was never read or was read and the wrong line chosen.
 That is what a labelled set of real photos will be built from.
+
+**What the first real photos changed.** Five real scans (a Topps Chrome wrestling
+card front and back, a second wrestling card front and back, one Pokémon card) were
+read very differently from the drawn cards, in three ways the drawn cards had hidden.
+Every line was enlarged to 100-pixel capitals for the second reading, which suited
+the drawn cards, when a real card's own 35-pixel lettering read at 92% and the enlarged
+copy read as "sway war" (both sizes are read now, and the better wins). A gold stripe read as "NLE SE" outranked the real name
+because it was bigger, though one of its two words was 22% sure. And a second
+reading split the Pokémon name "Regigigas" into "Regigi gas". The exact name
+was right on 1 of the 5 photos before these fixes and on 4 of 5 after. Five photos
+say very little, and the fifth (light stencil capitals on a diamond-plate) still
+reads as junk at every size and setting tried, though its back reads cleanly.
+Sports and entertainment backs carry the name in plain type, which is why pairing
+the front and back photos matters more than any further tuning of the front.
 
 ### The eBay file — `test/ebay.test.mjs` and `test/smoke.mjs`
 
