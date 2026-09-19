@@ -49,11 +49,13 @@ boundaries below are already where a framework would slot in.
 | `regions.js` | where the name and number sit, as fractions of the card | — |
 | `imagequality.js` | quality heuristics and user advice | — |
 | `ocr.js` | Tesseract worker pool, rendering the card, cropping strips | imageproc, regions |
+| `textlines.js` | words → lines → likeliest name; brand, league, year and print run from the text | — |
+| `generic.js` | reads a whole card for text when no database vouches for it | ocr, textlines |
 | `pipeline.js` | orchestrates one image into one card | most of the above |
 | `providers/*` | one card database each | queue, normalize |
 | `ui/*` | views, table, review, export | everything |
 
-Everything except `storage.js`, `ocr.js`, `pipeline.js` and `ui/*` is plain
+Everything except `storage.js`, `ocr.js`, `generic.js`, `pipeline.js` and `ui/*` is plain
 typed-array or string code with no browser dependencies, which is why it carries
 the unit tests, including finding a card in a synthetic photograph of known
 tilt. `pipeline.js` is tested in a real browser with OCR and the provider
@@ -103,6 +105,58 @@ little dark table looks like light-on-dark), so the inverted reading is a retry
 with a validity check instead. Measuring each pixel's deviation from its
 surroundings in both directions made every card worse, because the pale halo
 beside a dark stroke counts as ink and letters come out fat and merged.
+
+## Cards that are not in a database
+
+Sports, wrestling, film and other non-game cards have no free database, so
+nothing can vouch for what was read, and the strips above are the wrong tool:
+they look where a Pokémon card keeps its name, a band along the top. A Topps
+Chrome wrestling card keeps it on a nameplate near the bottom, so the strip
+reads whatever is at the top edge. That is how a Bray Wyatt card once scanned
+as "GERI".
+
+So when no database record matches with confidence, `generic.js` reads the
+whole card, and takes the text as it finds it:
+
+1. **Find text everywhere.** Overlapping strips down the whole card, each read
+   twice, light-on-dark and dark-on-light (a nameplate is dark on light, a logo
+   is the reverse), plus a close-up of the bottom edge where legal print sits.
+   If nothing could be a name, finer strips.
+2. **Group words into lines, then rank the lines that could be a name**
+   (`textlines.js`): how big (names are usually large), how sure the reading was,
+   whether it looks like a name (letters, a few words, no digits) and whether it
+   sits on a nameplate or in a banner. Brand, league and finish words ("TOPPS",
+   "WWE", "REFRACTOR", "ROOKIE") are not names. A first name stacked over a
+   surname is joined. A team name can still look like a name, which is why the
+   runners-up are kept and shown, not only the winner.
+3. **Read the best few again, each alone.** Sparse-text mode merges tightly set
+   italics into one word ("JORDANELLIS"); reading one line at a time keeps them
+   apart, and the gaps between the letters put the spaces back. A second reading
+   replaces the first only if it is the same letters with the spaces restored, or
+   is both surer and more name-like. It is never allowed to swap a good reading
+   for a worse one that merely looks tidier.
+4. **Pull out the rest** from the lines that say it: manufacturer and product
+   line from a short brand line or a © line, the league, a finish such as
+   Refractor, the year from a © line or beside a maker, a `#12` card number, and
+   a `37/99` print run.
+5. **Choose the framing by the result.** The located card first, then the whole
+   frame, then the card turned around. The strips cannot choose: on these cards
+   they find noise, and a noisy "signal" once made an upside-down reading win.
+
+What comes out is text, where it was, and how sure the reading was. It says
+nothing about what the card *is*. The pipeline stores each value as
+`source: 'ocr'` with the words it came from as `evidence`, replaces the strips'
+name (usually junk on these cards) and year (a strip's guess at digits is
+weaker than a line that says ©), and fills nothing else that is already there.
+A sport is recorded only as `inferred` from a league, with the rule named,
+capped at 0.7 (`CLAUDE.md` §2.1). A print run such as `37/99` is stored as
+`serial` and never as the card's number. Everything it read is kept on the card
+(`meta.texts`) so the review screen can offer "Use as…" for any line, because a
+person can always see what the reader could not choose.
+
+The card number, the set and the year of most sports and entertainment cards
+are printed on the **back**. The app reads the front only, so those stay empty
+and flagged, rather than guessed, until the back can be scanned too.
 
 ## The provider seam
 

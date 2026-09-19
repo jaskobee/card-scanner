@@ -9,7 +9,8 @@ import {
   findHp, pickName, withoutEvolutionLines,
 } from './normalize.js';
 import { rankCandidates } from './match.js';
-import { extracted, newCard, STATE, band } from './model.js';
+import { extracted, newCard, STATE, band, EMPTY } from './model.js';
+import { readAnyCard } from './generic.js';
 import { hashImageData } from './dupes.js';
 import * as store from './storage.js';
 
@@ -134,6 +135,29 @@ async function interpret({ canvas, ocr, provider, isKnownTotal }) {
   return { reading, signals, query, ranked: rankCandidates(query, candidates) };
 }
 
+/**
+ * Read a card that nothing vouches for, in whichever framing reads best. The strips
+ * choose a framing by what they found, and on a card that is not a Pokémon card what
+ * they find is noise, so this reader chooses for itself: the located card first, then
+ * the whole frame, then the card turned around (only this reader can tell that a
+ * lettered card is upside down, because it is the one that knows what a name looks like).
+ */
+const GOOD_NAME = 0.6;
+async function readAnyFraming(bitmap, placement, ocr, signal) {
+  const framings = placement
+    ? [['located', placement], ['whole-frame', null], ['turned-around', { ...placement, angle: placement.angle + Math.PI }]]
+    : [['whole-frame', null]];
+  let chosen = null;
+  for (const [framing, p] of framings) {
+    if (signal?.aborted) break;
+    const g = await readAnyCard(renderCard(bitmap, p), ocr);
+    const score = g.names[0]?.score ?? 0;
+    if (!chosen || score > chosen.score) chosen = { ...g, framing, score };
+    if (score >= GOOD_NAME) break;
+  }
+  return chosen;
+}
+
 const isConfident = (a) => band(a.ranked.confidence, a.ranked.margin).key === 'HIGH';
 const hasSignal = (a) => Boolean(a.signals.name || a.signals.number);
 
@@ -159,6 +183,7 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   //    card from the original so small print keeps the detail the photo has.
   const bitmap = await createImageBitmap(file);
   let best = null;
+  let general = null;
   let quality, hash;
   try {
     const small = downscale(bitmap);
@@ -185,14 +210,26 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
       ? [['located', placement], ['whole-frame', null]]
       : [['whole-frame', null]];
     for (const [label, p] of framings) {
-      const attempt = { ...(await interpret({ canvas: renderCard(bitmap, p), ocr, provider, isKnownTotal })), framing: label };
+      const canvas = renderCard(bitmap, p);
+      const attempt = { ...(await interpret({ canvas, ocr, provider, isKnownTotal })), framing: label, canvas };
       if (!best || isBetter(attempt, best)) best = attempt;
       if (isConfident(best) || signal?.aborted) break;
     }
     if (placement && !isConfident(best) && !hasSignal(best) && !signal?.aborted) {
       const turned = { ...placement, angle: placement.angle + Math.PI };
-      const attempt = { ...(await interpret({ canvas: renderCard(bitmap, turned), ocr, provider, isKnownTotal })), framing: 'turned-around' };
-      if (isBetter(attempt, best)) best = attempt;
+      const canvas = renderCard(bitmap, turned);
+      const attempt = { ...(await interpret({ canvas, ocr, provider, isKnownTotal })), framing: 'turned-around', canvas };
+      // Upside-down lettering reads as plausible junk, so being turned around only wins
+      // when it finds something a database agrees with, not merely something.
+      if (attempt.ranked.confidence > best.ranked.confidence) best = attempt;
+    }
+
+    // No database vouches for this card. It may be a sports card, a wrestling card, a
+    // film card: something the strips above were never built to read. So read what is
+    // printed on it, wherever it is printed. This is only ever text, with the place it
+    // was read from; nothing here says what the card is.
+    if ((!best.ranked.best || best.ranked.confidence < 0.5) && !signal?.aborted) {
+      general = await readAnyFraming(bitmap, placement, ocr, signal);
     }
   } finally {
     bitmap.close();
@@ -204,8 +241,15 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   card.meta.ocrConfidence = reading.confidence;
   card.meta.framing = best.framing;
 
+  if (general) {
+    card.meta.framing = general.framing;
+    card.meta.read = 'text';
+    card.meta.texts = general.texts;
+    card.meta.names = general.names.slice(1).map((n) => n.text);
+  }
+
   // Nothing readable is a real outcome, not a reason to guess.
-  if (!query.name && !query.number) {
+  if (!query.name && !query.number && !general?.names.length && !Object.keys(general?.evidence ?? {}).length) {
     card.state = STATE.NEEDS_REVIEW;
     card.errors.push(
       quality.issues.length
@@ -233,6 +277,8 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   if (signals.variant) card.fields.variant = extracted(signals.variant.value, 'ocr', clamp(reading.confidence), signals.variant.raw);
   if (signals.language) card.fields.language = extracted(signals.language.value, 'ocr', 0.8, signals.language.raw);
   if (signals.year) card.fields.year = extracted(signals.year.value, 'ocr', 0.85, signals.year.raw);
+
+  if (general) applyGeneral(card, general);
 
   if (ranked.best) {
     const b = ranked.best;
@@ -270,6 +316,52 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
 
   card.meta.processingMs = Math.round(performance.now() - startedAt);
   return card;
+}
+
+/**
+ * Record what the general reader found. Each value keeps the exact text it was read
+ * from. Nothing overwrites what the card already has, with three exceptions that are
+ * about *where* the strips looked: the name, because the strip reader takes it from
+ * where Pokémon put it and on any other card that is usually junk from the edge; the
+ * year, because a strip's guess at digits is weaker than a line that says ©; and a
+ * variant that is really a product line.
+ */
+function applyGeneral(card, g) {
+  const has = (f) => Boolean(card.fields[f]?.value);
+  const put = (field, value, confidence, evidence, source = 'ocr') => {
+    card.fields[field] = extracted(value, source, clamp(confidence), evidence);
+  };
+  const e = g.evidence;
+
+  const name = g.names[0];
+  if (name) put('name', name.text, name.confidence * 0.85, name.text);
+
+  if (e.manufacturer && !has('manufacturer')) put('manufacturer', e.manufacturer.value, e.manufacturer.confidence * 0.9, e.manufacturer.raw);
+  if (e.product && !has('set')) put('set', e.product.value, e.product.confidence * 0.85, e.product.raw);
+  if (e.year) put('year', e.year.value, e.year.confidence * 0.85, e.year.raw);
+  if (e.number && !has('number')) put('number', e.number.value, e.number.confidence * 0.8, e.number.raw);
+
+  if (e.league) {
+    const { league, sport } = e.league.value;
+    put('league', league, e.league.confidence * 0.9, e.league.raw);
+    // An NBA card is a basketball card. That is a rule, so it is recorded as one, and
+    // an inference never scores as certain.
+    if (sport && !has('sport')) put('sport', sport, 0.7, `${league} is a ${sport} league`, 'inferred');
+  }
+
+  // "37/99" on a card is the print run of a numbered parallel, not the card's number.
+  if (e.serial) {
+    put('serial', e.serial.value, e.serial.confidence * 0.8, e.serial.raw);
+    if (card.fields.number?.value === e.serial.value) card.fields.number = { ...EMPTY };
+  }
+
+  // Chrome and Prizm are product lines. A parallel is a finish such as a refractor.
+  if (e.finish) put('variant', e.finish.value, e.finish.confidence * 0.8, e.finish.raw);
+  else if (/^(chrome|prizm)$/i.test(card.fields.variant?.value ?? '')) card.fields.variant = { ...EMPTY };
+
+  const missing = ['name', 'set', 'number', 'year'].filter((f) => !has(f));
+  const unsure = name && name.confidence >= 0.6 ? [] : ['name'];
+  card.flags = [...new Set([...card.flags, ...missing, ...unsure])];
 }
 
 function fill(card, field, value, confidence, evidence) {

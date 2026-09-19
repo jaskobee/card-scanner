@@ -335,3 +335,9 @@ kbd {
 /* --- export options ------------------------------------------------------ */
 
 .formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px 14px; }
+
+/* --- everything we read on a card ---------------------------------------- */
+
+.textrow { display: flex; gap: 10px; align-items: center; padding: 7px 12px; border-top: 1px solid var(--border); }
+.textrow:first-child { border-top: 0; }
+.textrow .t { flex: 1; font-family: var(--mono); font-size: .85rem; overflow-wrap: anywhere; }
