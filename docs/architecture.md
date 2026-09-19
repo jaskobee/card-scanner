@@ -129,12 +129,23 @@ whole card, and takes the text as it finds it:
    "WWE", "REFRACTOR", "ROOKIE") are not names. A first name stacked over a
    surname is joined. A team name can still look like a name, which is why the
    runners-up are kept and shown, not only the winner.
-3. **Read the best few again, each alone.** Sparse-text mode merges tightly set
-   italics into one word ("JORDANELLIS"); reading one line at a time keeps them
-   apart, and the gaps between the letters put the spaces back. A second reading
-   replaces the first only if it is the same letters with the spaces restored, or
-   is both surer and more name-like. It is never allowed to swap a good reading
-   for a worse one that merely looks tidier.
+3. **Read the best few again, each alone, and believe that reading.** Sparse-text
+   mode merges tightly set italics into one word ("JORDANELLIS") and reads stripes
+   and logos as lettering with middling confidence. Read alone as a single line, a
+   real name comes back 85 to 95 percent sure and a pattern under 50, so this is
+   what tells them apart. It is read at two sizes and the better reading wins: at
+   about its own size, and enlarged to 100-pixel capitals. A blurred photo reads
+   better enlarged, but a real card's clean 35-pixel "BRAY WYATT" read 92 percent
+   sure as it was and as "sway war" enlarged, so neither size can be assumed. If
+   neither convinces, 30 and 70 are tried too. The gaps between capital letters put the spaces back; in ordinary
+   type Tesseract's own spacing is kept ("Regigigas" is one word). A second reading
+   replaces the first only if it is the same capitals with the spaces restored, or
+   is both surer and more name-like, never merely tidier.
+
+   Ranking then treats confidence as a test of whether something is lettering at
+   all, not of whether it is the name: once a line reads sure enough, being surer
+   adds nothing, so a team name read at 95 percent does not beat a player read at
+   85. Size, position and shape choose among the lines that are real lettering.
 4. **Pull out the rest** from the lines that say it: manufacturer and product
    line from a short brand line or a © line, the league, a finish such as
    Refractor, the year from a © line or beside a maker, a `#12` card number, and
