@@ -75,8 +75,11 @@ export const IDENTIFICATION_FIELDS = [
 export const VARIANT_FIELDS = ['variant', 'finish', 'edition', 'serial'];
 
 // Fields the user owns outright. §5: condition is never inferred from an image.
+// `cardType` is which eBay category the card is listed in (trading card game,
+// sports, non-sport): a listing decision, so the user's, unless the database has
+// identified the card as belonging to a game.
 export const USER_FIELDS = [
-  'condition', 'gradingCompany', 'grade', 'certNumber', 'graded',
+  'condition', 'gradingCompany', 'grade', 'certNumber', 'graded', 'cardType',
   'quantity', 'sku', 'sellerNotes', 'price',
 ];
 
@@ -135,7 +138,9 @@ export function isAutoAcceptable(card) {
 
 /** Plain value of a field, preferring a user correction. */
 export function valueOf(card, field) {
-  if (field in card.user && card.user[field] != null) return card.user[field];
+  // Membership in USER_FIELDS, not in this card's own `user` object: a card
+  // saved by an earlier version lacks keys for fields added since.
+  if (USER_FIELDS.includes(field) && card.user?.[field] != null) return card.user[field];
   const f = card.fields[field];
   return f ? f.value : null;
 }
@@ -143,7 +148,7 @@ export function valueOf(card, field) {
 /** Apply a user correction. User input is authoritative and never overwritten. */
 export function correct(card, field, value) {
   const next = { ...card, fields: { ...card.fields }, user: { ...card.user } };
-  if (field in next.user) {
+  if (USER_FIELDS.includes(field)) {
     next.user[field] = value === '' ? null : value;
   } else {
     next.fields[field] = extracted(value, 'user', 1, 'user correction');
