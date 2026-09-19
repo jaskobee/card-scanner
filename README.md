@@ -65,6 +65,7 @@ image → quality → find card → straighten → read name & number → card d
 | Lookup | TCGdex | free, open, no key, multilingual; by number and set size, or by name narrowed by number and HP |
 | Ranking | browser | weighted signal agreement, with a margin check |
 | Second opinion | browser | a reading that is not confident is repeated with a different framing before you are asked |
+| Everything else | browser | a card no database knows (sports, wrestling, film) is read for text wherever it is printed: name, maker, product, year, league, print run |
 
 Nothing is populated without evidence. Every identification value carries where
 it came from, how confident we are, and the exact text it was read from:
@@ -134,13 +135,20 @@ and touching neither the pipeline, the UI nor the exporter.
 
 Worth knowing before you scan 500 cards:
 
-- **Pokémon only** so far.
+- **Pokémon is the only card database.** Sports, wrestling, film and other cards
+  are read from what is printed on them: the name, the maker, the product line,
+  the league, the year. Nothing checks those against a database, so they always
+  go to review, and a name set in a hard-to-read typeface may still come out
+  wrong or partial. The review screen lists every line it read so you can pick
+  the right one.
 - **One card per photo.** Multi-card photos are a planned step, and the
   pipeline is already shaped for it, but it is not built.
 - **Drafts, not live listings.** A CSV cannot carry photos and yours stay on your
   device, so eBay listings are created as drafts and you add the photos there.
 - **Excel templates are not read yet.** Download eBay's template as `.csv`.
-- **Front only.** Back-image support is modelled but not wired up.
+- **Front only.** Back-image support is modelled but not wired up. Sports and
+  entertainment cards print the card number, set and often the year on the
+  back, so those fields stay empty on them until the back can be scanned.
 - **No pricing.** Identification and valuation are deliberately separate
   systems; pricing is not implemented rather than implemented badly.
 - **Condition is yours.** The app will not guess condition from a photo, ever.

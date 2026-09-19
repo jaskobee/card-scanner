@@ -38,6 +38,14 @@ The pure modules carry the tests, because they carry the risk:
 - **Reading** — built from strings Tesseract really returned: picking the name
   from junk, never taking one from an "Evolves from" line, HP that no card can
   have, a slash read as a pipe, a set size that does not exist.
+- **Text reading** (`textlines.test.mjs`) — built from what Tesseract really
+  returned for drawn cards, not from strings we made up: grouping words into
+  lines whatever order they arrive in, choosing a name from logos, team names and
+  legal print, restoring word spaces from the gaps between letters, refusing to
+  strand a single letter ("TO B IAS"), keeping apostrophes and hyphens
+  (`DE'ANDRE`, `TANAKA-REYES`), never letting a tidier-looking reading replace a
+  better one, and pulling manufacturer, product, league, finish, year, number and
+  print run out of the lines that say them.
 - **The card database** — with a fake `fetch` shaped like the real API: the two
   lookup routes, the year check that stops a misread set size landing on the
   wrong printing, filters dropped in turn, and that a failing database throws
@@ -54,7 +62,10 @@ leave storage and not merely that the rows leave the table.
 Stubbing them is deliberate. This test proves our wiring — canvas handling,
 cropping, signal extraction, scoring, provenance, persistence — rather than a
 third party's uptime. It also checks the number-reading retry: corners are read
-once when a valid number comes out, and again inverted only when none does.
+once when a valid number comes out, and again inverted only when none does, and
+that a card no database knows keeps the name, maker and year printed on it (each
+with the words it came from) instead of the junk the Pokémon strips read there,
+while a number and a set nobody printed stay empty.
 
 ### Scan accuracy — `tools/accuracy.mjs`
 
