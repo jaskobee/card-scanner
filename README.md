@@ -93,12 +93,20 @@ is strong.
 eBay has no universal CSV. Columns differ by category and by country, and they
 change. So the app reads **your** template from Seller Hub rather than guessing:
 
-1. Upload your eBay template file
-2. It finds the header row beneath eBay's preamble
+1. Upload your eBay template file (download it as `.csv` from Seller Hub → Reports → Uploads)
+2. It finds the header row beneath eBay's preamble, and keeps eBay's info lines
 3. It maps what it can and shows you the mapping
 4. Unknown columns are preserved verbatim, in position
 5. Required columns with no evidence are marked `Needs review`, never invented
 6. It validates before letting you download
+
+Trading cards have their own rules: each card is filed in the right category
+(card games, sports, non-sport such as celebrities), and is either graded or
+ungraded, each described the way eBay asks. You choose these; nothing is guessed.
+See [docs/ebay-card-listings.md](docs/ebay-card-listings.md).
+
+No template yet? There is a **starter** for draft listings. It is not eBay's file
+and is labelled as such: try one card first.
 
 Files are UTF-8 with a BOM so `Ä Ö Ü ß` survive in German Excel. Card numbers
 like `004/120` are quoted as text so they are not silently turned into dates,
@@ -127,6 +135,9 @@ Worth knowing before you scan 500 cards:
 - **Pokémon only** so far.
 - **One card per photo.** Multi-card photos are a planned step, and the
   pipeline is already shaped for it, but it is not built.
+- **Drafts, not live listings.** A CSV cannot carry photos and yours stay on your
+  device, so eBay listings are created as drafts and you add the photos there.
+- **Excel templates are not read yet.** Download eBay's template as `.csv`.
 - **Front only.** Back-image support is modelled but not wired up.
 - **No pricing.** Identification and valuation are deliberately separate
   systems; pricing is not implemented rather than implemented badly.
@@ -141,7 +152,7 @@ Worth knowing before you scan 500 cards:
 ## Tests
 
 ```bash
-npm test     # 76 unit tests, zero dependencies
+npm test     # unit tests, zero dependencies
 npm run check  # import graph, unsafe innerHTML, missing references
 node test/smoke.mjs   # browser smoke + pipeline E2E (needs Playwright)
 ```
@@ -162,6 +173,7 @@ a third party's uptime.
 | [deployment.md](docs/deployment.md) | hosting options compared |
 | [card-data-sources.md](docs/card-data-sources.md) | providers, limits, licensing |
 | [ebay-export.md](docs/ebay-export.md) | template handling and CSV safety |
+| [ebay-card-listings.md](docs/ebay-card-listings.md) | what eBay needs for trading cards, and how well each fact was verified |
 | [testing.md](docs/testing.md) | strategy, and the fixture set we owe |
 | [troubleshooting.md](docs/troubleshooting.md) | when something goes wrong |
 | [roadmap.md](docs/roadmap.md) | what is next and what is deliberately not |

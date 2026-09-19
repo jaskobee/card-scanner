@@ -25,6 +25,10 @@ before infrastructure gets built.
 ## Phase 2
 
 - [ ] Saved mapping templates per category
+- [ ] Read eBay's Excel (`.xlsx`) templates: a multi-category download is Excel by default
+- [ ] Verify the starter against real German templates (`test-data/ebay-templates/`)
+- [ ] Set card type, condition and price for many cards at once (needs multi-select)
+- [ ] Item specifics (`C:` columns) for cards, from the real templates rather than guessed
 - [ ] Batch retry from the results view
 - [ ] Per-card processing diagnostics in the UI
 - [ ] Better name extraction — the current heuristic is the weakest link

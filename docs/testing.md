@@ -3,7 +3,7 @@
 ## What exists
 
 ```bash
-npm test              # 76 unit tests, node:test, zero dependencies
+npm test              # unit tests, node:test, zero dependencies
 npm run check         # import graph, unsafe innerHTML, missing references
 node test/smoke.mjs   # browser smoke + pipeline E2E (Playwright)
 ```
@@ -38,6 +38,21 @@ through the **whole pipeline** with OCR and the provider stubbed.
 Stubbing them is deliberate. This test proves our wiring — canvas handling,
 cropping, signal extraction, scoring, provenance, persistence — rather than a
 third party's uptime.
+
+### The eBay file — `test/ebay.test.mjs` and `test/smoke.mjs`
+
+Unit tests cover the eBay knowledge (categories, the four ungraded conditions,
+graders, grades, and that nothing outside eBay's lists is translated) and a mixed
+batch through the template machinery. The browser test then exports a real mixed
+batch and asserts on **the file a person would upload**: the info line first,
+`Action` leading, each card in its own category, 2750 against 4000, the
+descriptors, leading zeroes in a certificate number, `Format` always written, a
+template's own info lines and unknown columns written back untouched, and that an
+Excel template is explained rather than ignored.
+
+Every eBay header in these tests is **reconstructed from what eBay's pages
+document, not an eBay-issued file**, and the tests say so. Real templates in
+`test-data/ebay-templates/` would replace them.
 
 ## What is missing, and it matters
 
