@@ -85,6 +85,14 @@ downscaled to 1400px for OCR and to a 220px WebP thumbnail for display; the
 original blob goes to IndexedDB and the bitmap is closed immediately. Object
 URLs are handed out by `UrlCache` so they can all be revoked together.
 
+Deleting a card removes its record and its photos in one transaction
+(`removeCards`), so a crash cannot leave one without the other. The originals
+are the bulk of what is stored, which is why leaving them behind is not an
+option. At start-up `sweepOrphanBlobs` removes photos whose card no longer
+exists — left by earlier versions that deleted only the record. It spares
+anything saved in the last day, because a second open tab may be mid-scan with a
+photo written and its card not yet saved.
+
 ## What is deliberately not here
 
 No backend, no accounts, no analytics, no telemetry. Adding any of them changes

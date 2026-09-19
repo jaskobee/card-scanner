@@ -3,7 +3,7 @@
 ## What exists
 
 ```bash
-npm test              # 76 unit tests, node:test, zero dependencies
+npm test              # unit tests, node:test, zero dependencies
 npm run check         # import graph, unsafe innerHTML, missing references
 node test/smoke.mjs   # browser smoke + pipeline E2E (Playwright)
 ```
@@ -33,7 +33,9 @@ The pure modules carry the tests, because they carry the risk:
 
 Drives a real Chromium: boots the app, walks every view, asserts no console
 errors, checks every control has an accessible name, and runs a synthetic image
-through the **whole pipeline** with OCR and the provider stubbed.
+through the **whole pipeline** with OCR and the provider stubbed. It also
+selects and deletes cards against real IndexedDB, asserting that the photos
+leave storage and not merely that the rows leave the table.
 
 Stubbing them is deliberate. This test proves our wiring — canvas handling,
 cropping, signal extraction, scoring, provenance, persistence — rather than a
