@@ -86,8 +86,12 @@ export class OcrPool {
       return {
         text: data.text ?? '',
         confidence: (data.confidence ?? 0) / 100,
-        words: (data.words ?? []).map((x) => ({ text: x.text, confidence: (x.confidence ?? 0) / 100 })),
-        lines: (data.lines ?? []).map((x) => ({ text: (x.text ?? '').trim(), confidence: (x.confidence ?? 0) / 100 })),
+        // `bbox` is where the text sat in the image it was read from, so a reading
+        // can say how big a piece of text was and where on the card it was.
+        words: (data.words ?? []).map((x) => ({ text: x.text, confidence: (x.confidence ?? 0) / 100, bbox: box(x.bbox) })),
+        lines: (data.lines ?? []).map((x) => ({ text: (x.text ?? '').trim(), confidence: (x.confidence ?? 0) / 100, bbox: box(x.bbox) })),
+        // Individual letters, for measuring the gaps between them.
+        symbols: (data.symbols ?? []).map((x) => ({ text: x.text, confidence: (x.confidence ?? 0) / 100, bbox: box(x.bbox) })),
       };
     } finally {
       this.#release(w);
@@ -99,6 +103,8 @@ export class OcrPool {
     this.workers = []; this.available = []; this.ready = null;
   }
 }
+
+const box = (b) => (b ? { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 } : null);
 
 /**
  * A downscaled working copy for the cheap measurements (quality, duplicate hash,
@@ -174,7 +180,17 @@ export function renderCard(source, placement = null, { width = 1000 } = {}) {
  * in a little dark table looks like light-on-dark), so the caller decides, by
  * retrying inverted when a normal reading finds nothing valid.
  */
-export async function regionForOcr(cardCanvas, region, { targetHeight = 240, invert = false } = {}) {
+export async function regionForOcr(cardCanvas, region, opts) {
+  return (await regionImage(cardCanvas, region, opts)).blob;
+}
+
+/**
+ * The same crop as regionForOcr, plus `toCard(x, y)` to turn a position in the
+ * crop back into a position on the card, and the scale it was enlarged by. A word
+ * Tesseract finds at (x, y) in the crop is at toCard(x, y) on the card, and its
+ * height on the card is its height in the crop divided by `scale`.
+ */
+export async function regionImage(cardCanvas, region, { targetHeight = 240, invert = false } = {}) {
   const { sx, sy, sw, sh } = regionRect(region, cardCanvas.width, cardCanvas.height);
   const k = targetHeight / sh;
   const w = Math.max(1, Math.round(sw * k));
@@ -193,5 +209,9 @@ export async function regionForOcr(cardCanvas, region, { targetHeight = 240, inv
   if (invert) for (let i = 0; i < g.length; i++) g[i] = 255 - g[i];
   img.data.set(toRgba(stretchContrast(flattenIllumination(g, c.width, c.height, Math.round(h * 0.3)))));
   x.putImageData(img, 0, 0);
-  return c.convertToBlob({ type: 'image/png' });
+  return {
+    blob: await c.convertToBlob({ type: 'image/png' }),
+    scale: k,
+    toCard: (px, py) => ({ x: sx + (px - pad) / k, y: sy + (py - pad) / k }),
+  };
 }
