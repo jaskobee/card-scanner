@@ -1,0 +1,18 @@
+{
+  "name": "card-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn a pile of trading cards into an eBay-ready listing file. Runs entirely in the browser.",
+  "scripts": {
+    "start": "node tools/serve.js",
+    "dev": "node tools/serve.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node tools/check.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["trading-cards", "ocr", "ebay", "csv", "pokemon"],
+  "license": "MIT"
+}
