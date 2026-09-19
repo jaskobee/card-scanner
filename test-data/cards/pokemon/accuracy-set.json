@@ -1,0 +1,21 @@
+{
+  "description": "Cards for tools/accuracy.mjs. Only the coordinates live here: the images and the expected name, number and set are fetched from the database and cached (not committed). Chosen to span eras, layouts and finishes, plus German printings.",
+  "cards": [
+    { "lang": "en", "set": "base1", "localId": "4" },
+    { "lang": "en", "set": "base1", "localId": "58" },
+    { "lang": "en", "set": "base2", "localId": "1" },
+    { "lang": "en", "set": "base3", "localId": "10" },
+    { "lang": "en", "set": "ex1", "localId": "1" },
+    { "lang": "en", "set": "dp1", "localId": "1" },
+    { "lang": "en", "set": "bw1", "localId": "1" },
+    { "lang": "en", "set": "xy1", "localId": "1" },
+    { "lang": "en", "set": "sm1", "localId": "1" },
+    { "lang": "en", "set": "swsh1", "localId": "1" },
+    { "lang": "en", "set": "swsh4", "localId": "44" },
+    { "lang": "en", "set": "sv01", "localId": "1" },
+    { "lang": "en", "set": "sv03", "localId": "54" },
+    { "lang": "en", "set": "sv04", "localId": "28" },
+    { "lang": "de", "set": "swsh1", "localId": "1" },
+    { "lang": "de", "set": "sv01", "localId": "1" }
+  ]
+}
