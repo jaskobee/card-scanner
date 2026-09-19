@@ -155,6 +155,119 @@ log(pipeline.conditionValue === null, 'condition is left for the user, never inf
 log(pipeline.hasThumb, 'a thumbnail is stored so originals can be released');
 log(pipeline.state === 'NEEDS_REVIEW', 'a flagged card routes to review rather than auto-accepting', pipeline.state);
 
+// --- selecting and deleting cards, against real IndexedDB -----------------------
+// Deleting must remove the photos too: they are the full-resolution originals,
+// and leaving them behind would fill the browser's storage invisibly.
+
+const seededIds = await page.evaluate(async () => {
+  const store = await import('/src/storage.js');
+  const { newCard, extracted } = await import('/src/model.js');
+  const [project] = await store.all('projects');
+  const base = Date.now();
+  const ids = [];
+  for (const [i, name] of ['Alpha', 'Bravo', 'Charlie', 'Delta'].entries()) {
+    const card = newCard({ projectId: project.id });
+    card.createdAt = base + i;
+    card.fields.name = extracted(name, 'user', 1);
+    card.images = { front: `${card.id}:front`, back: null, thumb: `${card.id}:thumb` };
+    await store.putBlob(card.images.front, new Blob(['front'], { type: 'image/png' }));
+    await store.putBlob(card.images.thumb, new Blob(['thumb'], { type: 'image/png' }));
+    await store.put('cards', card);
+    ids.push(card.id);
+  }
+  return ids;
+});
+
+await page.reload({ waitUntil: 'networkidle' });
+await page.locator('#tabs button', { hasText: 'Cards' }).click();
+await page.waitForSelector('#tablehost tbody tr');
+
+const rows = page.locator('#tablehost tbody tr');
+const tick = (i) => rows.nth(i).locator('.selbox');
+const bar = page.locator('.selbar');
+const barText = async () => ((await bar.count()) ? (await bar.first().innerText()).split('\n')[0] : '');
+const search = page.locator('input[aria-label="Search cards"]');
+
+log(await rows.count() === 4, 'every card has a row', String(await rows.count()));
+log(await bar.count() === 0, 'no action bar until something is selected');
+
+await tick(0).check();
+log(/1 selected/.test(await barText()), 'ticking a card shows how many are selected', await barText());
+log(await page.locator('#selectall').evaluate((el) => el.indeterminate), 'the header box shows a partial selection');
+
+await tick(2).click({ modifiers: ['Shift'] });
+log(/3 selected/.test(await barText()), 'shift-click selects the whole range', await barText());
+
+await page.locator('#selectall').check();
+log(/4 selected/.test(await barText()), 'the header box selects every shown card', await barText());
+await page.locator('#selectall').uncheck();
+log(await bar.count() === 0, 'unticking the header box clears the selection');
+
+await tick(1).check();
+await page.keyboard.press('Escape');
+log(await bar.count() === 0 && !(await tick(1).isChecked()), 'Escape clears the selection');
+
+// A search that hides selected cards must not leave them selected: a bulk
+// action may never reach a card the user cannot see.
+await page.locator('#selectall').check();
+await search.fill('Alpha');
+await page.waitForTimeout(150);
+log(/1 selected/.test(await barText()), 'narrowing the view drops the hidden cards from the selection', await barText());
+await search.fill('');
+await page.waitForTimeout(150);
+log(/1 selected/.test(await barText()), 'widening the view does not bring them back', await barText());
+await page.locator('.selbar button', { hasText: 'Clear' }).click();
+
+// Delete asks first, and Cancel really cancels.
+await tick(1).check();
+await tick(2).check();
+await page.locator('#bulk-delete').click();
+const prompt = await page.locator('.selbar.danger').innerText();
+log(/Delete 2 cards and their photos\?/.test(prompt), 'delete asks before removing anything', prompt.split('\n')[0]);
+await page.locator('.selbar.danger button', { hasText: 'Cancel' }).click();
+log(await page.locator('.selbar.danger').count() === 0 && /2 selected/.test(await barText()),
+  'cancelling keeps the cards and their selection');
+log(await rows.count() === 4, 'nothing was removed by cancelling');
+
+await page.locator('#bulk-delete').click();
+await page.locator('#confirm-delete').click();
+await page.waitForFunction(() => document.querySelectorAll('#tablehost tbody tr').length === 2);
+log(/Deleted 2 cards/.test(await page.locator('#toast').innerText()), 'the user is told what was deleted');
+
+const after = await page.evaluate(async (ids) => {
+  const store = await import('/src/storage.js');
+  const cards = (await store.all('cards')).map((c) => c.id);
+  const blobKeys = (await store.keys('blobs')).map(String);
+  return {
+    cards: ids.map((id) => cards.includes(id)),
+    blobs: ids.map((id) => blobKeys.filter((k) => k.startsWith(`${id}:`)).length),
+  };
+}, seededIds);
+log(JSON.stringify(after.cards) === '[true,false,false,true]', 'only the chosen cards were removed', JSON.stringify(after.cards));
+log(JSON.stringify(after.blobs) === '[2,0,0,2]', 'their photos were removed from storage too', JSON.stringify(after.blobs));
+
+// Photos orphaned by the old delete are cleaned up, but a photo saved moments
+// ago is kept — another tab may be mid-scan and not have saved its card yet.
+const swept = await page.evaluate(async (ids) => {
+  const store = await import('/src/storage.js');
+  const day = 24 * 60 * 60 * 1000;
+  const blob = () => new Blob(['x']);
+  await store.put('blobs', { id: 'ghost-legacy:front', blob: blob() });
+  await store.put('blobs', { id: 'ghost-old:front', blob: blob(), at: Date.now() - 2 * day });
+  await store.put('blobs', { id: 'ghost-new:front', blob: blob(), at: Date.now() });
+  await store.sweepOrphanBlobs();
+  const left = (await store.keys('blobs')).map(String);
+  return {
+    legacy: left.includes('ghost-legacy:front'),
+    old: left.includes('ghost-old:front'),
+    recent: left.includes('ghost-new:front'),
+    liveKept: ids.map((id) => left.filter((k) => k.startsWith(`${id}:`)).length),
+  };
+}, seededIds);
+log(!swept.legacy && !swept.old, 'orphaned photos from before this fix are swept away');
+log(swept.recent, 'a photo saved moments ago is never swept');
+log(JSON.stringify(swept.liveKept) === '[2,0,0,2]', 'photos belonging to existing cards are untouched', JSON.stringify(swept.liveKept));
+
 log(consoleErrors.length === 0, 'no console errors after navigating every view', consoleErrors.join(' | '));
 
 await browser.close();
