@@ -155,6 +155,15 @@ if (bad.length) {
   console.log('\nmisses:');
   for (const r of bad) console.log(`  ${r.id}/${r.condition}: wanted "${r.truth.name}", got ${JSON.stringify(r.got.name)}  (others: ${r.got.names.slice(1, 3).map((n) => JSON.stringify(n)).join(', ') || 'none'})`);
 }
+// The small print: manufacturer, product line and year, where the card carries them.
+const print = results.filter((r) => r.brandOk === false || r.productOk === false || r.yearOk === false).slice(0, 8);
+if (print.length) {
+  console.log('\nsmall print not read:');
+  for (const r of print) {
+    const lost = [r.brandOk === false && `maker ${JSON.stringify(r.got.manufacturer)}`, r.productOk === false && `product ${JSON.stringify(r.got.product)}`, r.yearOk === false && `year ${JSON.stringify(r.got.year)}`].filter(Boolean).join(', ');
+    console.log(`  ${r.id}/${r.condition}: wanted ${[r.truth.manufacturer, r.truth.product, r.truth.year].filter(Boolean).join(' / ')}, got ${lost}`);
+  }
+}
 // Right letters, wrong spaces ("JORDA NELLIS") count as found above but read badly on a listing.
 const spacing = results.filter((r) => r.nameOk && !r.nameSpaced).slice(0, 8);
 if (spacing.length) {
