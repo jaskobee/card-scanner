@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Static checks
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Playwright (dev only — the app itself has no dependencies)
+        run: npm i -D playwright && npx playwright install --with-deps chromium
+      - name: Serve and smoke test
+        run: |
+          node tools/serve.js &
+          npx wait-on http://localhost:8080 || sleep 3
+          node test/smoke.mjs
