@@ -141,7 +141,7 @@ Worth knowing before you scan 500 cards:
 ## Tests
 
 ```bash
-npm test     # 76 unit tests, zero dependencies
+npm test     # unit tests, zero dependencies
 npm run check  # import graph, unsafe innerHTML, missing references
 node test/smoke.mjs   # browser smoke + pipeline E2E (needs Playwright)
 ```

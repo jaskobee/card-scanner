@@ -14,6 +14,7 @@ before infrastructure gets built.
 - [x] Confidence with margin and field-level flags
 - [x] Inline editing everywhere, copy buttons everywhere
 - [x] Batches, sorting, filtering, search
+- [x] Multi-select in the cards table: shift-click ranges, bulk copy, bulk delete
 - [x] Duplicate detection and merge-to-quantity
 - [x] Keyboard-first review queue
 - [x] Generic CSV, JSON, and template-driven eBay CSV
