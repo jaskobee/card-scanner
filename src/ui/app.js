@@ -21,6 +21,7 @@ import {
   starterTemplate, formatPrice,
 } from '../ebay.js';
 import { rangeIds, pruneSelection, selectionState } from '../selection.js';
+import { pairPhotos, swapSides } from '../pairing.js';
 
 // --- application state ----------------------------------------------------
 
@@ -48,6 +49,11 @@ const app = {
     action: 'VerifyAdd', format: 'FixedPrice', duration: 'GTC', mark: '.', bom: true,
     cardType: '', condition: '', price: '',   // filled in only for cards that have none
   },
+  // What is being uploaded: one photo per card, or a front and a back. Persisted.
+  uploadMode: 'single',
+  // Photos waiting to be scanned as front-and-back pairs, shown for checking before anything runs.
+  pending: { pairs: [], method: null, shown: 24 },
+  previews: new Map(),   // photo (File) -> object URL, for the pairs being checked
   selected: new Set(),   // card ids ticked in the cards table
   anchorId: null,        // last ticked row: where a shift-click range starts
   confirmDelete: false,  // the bulk bar is asking "are you sure?"
@@ -84,6 +90,7 @@ async function init() {
   }
   app.titleTemplate = (await store.setting('titleTemplate')) ?? DEFAULT_TEMPLATE;
   app.provider.language = (await store.setting('language')) ?? 'en';
+  app.uploadMode = (await store.setting('uploadMode')) === 'pairs' ? 'pairs' : 'single';
   app.ebay = { ...app.ebay, ...((await store.setting('ebay')) ?? {}) };
   await store.sweepOrphanBlobs().catch(() => {}); // housekeeping must never stop the app starting
   await loadCards();
@@ -188,7 +195,148 @@ function go(v) {
 
 // --- upload view ----------------------------------------------------------
 
+// The photos of the pairs being checked, shown as thumbnails. Object URLs live until the
+// pair is removed or the batch starts, and are released then.
+function preview(file) {
+  if (!file) return null;
+  if (!app.previews.has(file)) app.previews.set(file, URL.createObjectURL(file));
+  return app.previews.get(file);
+}
+
+function forgetPreviews(files) {
+  for (const f of files) {
+    const url = app.previews.get(f);
+    if (url) { URL.revokeObjectURL(url); app.previews.delete(f); }
+  }
+}
+
+function addPhotos(files) {
+  const images = files.filter((f) => f.type.startsWith('image/'));
+  if (!images.length) { toast('Those files are not images'); return; }
+  const { pairs, method } = pairPhotos(images);
+  app.pending.pairs.push(...pairs.map((p) => ({ id: cryptoId(), ...p })));
+  app.pending.method = method;
+  render();
+}
+
+function clearPending() {
+  forgetPreviews(app.pending.pairs.flatMap((p) => [p.front, p.back].filter(Boolean)));
+  app.pending = { pairs: [], method: null, shown: 24 };
+}
+
+function removePair(id) {
+  const pair = app.pending.pairs.find((p) => p.id === id);
+  if (pair) forgetPreviews([pair.front, pair.back].filter(Boolean));
+  app.pending.pairs = app.pending.pairs.filter((p) => p.id !== id);
+  render();
+}
+
+function swapPair(id) {
+  const at = app.pending.pairs.findIndex((p) => p.id === id);
+  if (at >= 0) app.pending.pairs[at] = { id, ...swapSides(app.pending.pairs[at]) };
+  render();
+}
+
+/** Choose one photo for one side of a pair, in place of what is there or nothing. */
+function choosePhoto(pair, side) {
+  const input = h('input', { type: 'file', accept: 'image/*', style: { display: 'none' }, 'aria-hidden': 'true', tabindex: '-1' });
+  input.onchange = () => {
+    const file = input.files[0];
+    input.remove();
+    if (!file || !file.type.startsWith('image/')) return;
+    if (pair[side]) forgetPreviews([pair[side]]);
+    pair[side] = file;
+    render();
+  };
+  document.body.append(input);
+  input.click();
+}
+
+function slot(pair, side) {
+  const file = pair[side];
+  const word = side === 'front' ? 'Front' : 'Back';
+  if (!file) {
+    return h('button', {
+      class: 'slot empty', type: 'button', onClick: () => choosePhoto(pair, side),
+      'aria-label': `Add the ${side} photo`,
+    }, h('span', {}, `Add the ${side}`));
+  }
+  return h('figure', { class: 'slot' },
+    h('button', {
+      class: 'slot-photo', type: 'button', onClick: () => choosePhoto(pair, side),
+      'aria-label': `${word} photo ${file.name}. Choose a different one`, title: 'Choose a different photo',
+    }, h('img', { src: preview(file), alt: '', loading: 'lazy', decoding: 'async' })),
+    h('figcaption', {}, h('b', {}, word), h('span', { class: 'slot-name' }, file.name)),
+  );
+}
+
+function pairBuilder() {
+  const { pairs, method } = app.pending;
+  const scannable = pairs.filter((p) => p.front);
+  const backOnly = pairs.length - scannable.length;
+  const shown = pairs.slice(0, app.pending.shown);
+  const photos = pairs.reduce((n, p) => n + (p.front ? 1 : 0) + (p.back ? 1 : 0), 0);
+
+  return h('div', { class: 'panel pairs' },
+    h('div', { class: 'row' },
+      h('div', {},
+        h('h3', { style: { margin: 0 } }, `${scannable.length} ${scannable.length === 1 ? 'card' : 'cards'} ready to scan`),
+        h('p', { class: 'tiny muted', style: { margin: '2px 0 0' } },
+          `${photos} photos, ${method === 'names' ? 'paired by their file names (front, back)' : 'paired in the order you added them: front, back, front, back'}. Check them before you scan.`),
+      ),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn ghost', onClick: () => picker.click() }, icon('upload'), 'Add more photos'),
+      h('button', { class: 'btn ghost', onClick: () => { clearPending(); render(); } }, 'Clear all'),
+      h('button', {
+        class: 'btn primary', disabled: !scannable.length,
+        onClick: () => { const items = scannable.map((p) => ({ front: p.front, back: p.back })); clearPending(); startBatch(items); },
+      }, `Scan ${scannable.length} ${scannable.length === 1 ? 'card' : 'cards'}`),
+    ),
+    backOnly
+      ? h('div', { class: 'notice warn', style: { marginTop: '12px' } },
+          h('strong', {}, `${backOnly} back ${backOnly === 1 ? 'photo has' : 'photos have'} no front and will be skipped. `),
+          'Add the front photo to it, or remove it.')
+      : null,
+    h('div', { class: 'pairlist', role: 'list' },
+      ...shown.map((pair) => h('div', { class: 'pair', role: 'listitem' },
+        slot(pair, 'front'), slot(pair, 'back'),
+        h('div', { class: 'pair-actions' },
+          h('button', { class: 'btn small ghost', onClick: () => swapPair(pair.id), title: 'Swap the front and back photos' }, 'Swap'),
+          h('button', { class: 'btn small ghost', onClick: () => removePair(pair.id), 'aria-label': 'Remove this card' }, 'Remove'),
+        ),
+      ))),
+    pairs.length > shown.length
+      ? h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '12px' } },
+          h('button', { class: 'btn', onClick: () => { app.pending.shown += 24; render(); } }, `Show ${Math.min(24, pairs.length - shown.length)} more`))
+      : null,
+  );
+}
+
+/** Photos arrive: to be paired and checked, or, one photo per card, scanned straight away. */
+function addOrStart(files) {
+  if (app.uploadMode === 'pairs') addPhotos(files);
+  else startBatch(files.map((front) => ({ front, back: null })));
+}
+
+const MODES = [
+  ['single', 'One photo per card', 'Pokémon, Magic and other cards that print everything on the front.'],
+  ['pairs', 'Front and back', 'Wrestling, sports and entertainment cards, where the number and year are on the back.'],
+];
+
 function viewUpload() {
+  const pairs = app.uploadMode === 'pairs';
+  const modes = h('div', { class: 'modes', role: 'radiogroup', 'aria-label': 'What are you uploading?' },
+    ...MODES.map(([key, title, hint]) => h('label', { class: `mode${app.uploadMode === key ? ' on' : ''}` },
+      h('input', {
+        type: 'radio', name: 'uploadMode', value: key, checked: app.uploadMode === key,
+        // Show the choice at once; saving it can take a moment, and photos added in that
+        // moment must already be treated as the mode the person picked.
+        onChange: () => { app.uploadMode = key; render(); store.setting('uploadMode', key).catch(() => {}); },
+      }),
+      h('span', { class: 'mode-title' }, title),
+      h('span', { class: 'mode-hint' }, hint),
+    )));
+
   const zone = h('div', {
     class: 'dropzone',
     onDragover: (e) => { e.preventDefault(); zone.classList.add('over'); },
@@ -197,14 +345,16 @@ function viewUpload() {
       e.preventDefault();
       zone.classList.remove('over');
       const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
-      if (files.length) startBatch(files);
-      else toast('Those files are not images');
+      if (!files.length) toast('Those files are not images');
+      else addOrStart(files);
     },
   },
-    h('h2', {}, 'Drop your card photos here'),
-    h('p', { class: 'muted' }, 'One card per photo. Front only is enough.'),
+    h('h2', {}, pairs ? 'Drop the photos of your cards here' : 'Drop your card photos here'),
+    h('p', { class: 'muted' }, pairs
+      ? 'Front and back of each card. Name them with “front” and “back”, or add them in order: front, back, front, back.'
+      : 'One card per photo. The front is enough.'),
     h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '16px' } },
-      h('button', { class: 'btn primary', onClick: () => picker.click() }, icon('upload'), 'Choose images'),
+      h('button', { class: 'btn primary', onClick: () => picker.click() }, icon('upload'), pairs ? 'Choose photos' : 'Choose images'),
     ),
     h('p', { class: 'tiny muted', style: { marginTop: '14px' } }, 'JPG · PNG · WEBP · HEIC'),
     h('div', { class: 'steps' },
@@ -215,11 +365,12 @@ function viewUpload() {
   picker.onchange = () => {
     const files = [...picker.files];
     picker.value = '';
-    if (files.length) startBatch(files);
+    if (files.length) addOrStart(files);
   };
 
-  return h('div', { class: 'narrow' },
-    zone,
+  return h('div', { class: pairs && app.pending.pairs.length ? 'wide' : 'narrow' },
+    modes,
+    pairs && app.pending.pairs.length ? pairBuilder() : zone,
     h('div', { class: 'panel', style: { marginTop: '18px' } },
       h('div', { class: 'row' },
         h('div', {},
@@ -287,9 +438,10 @@ function viewUpload() {
 
 // --- batch processing -----------------------------------------------------
 
-async function startBatch(files) {
+/** @param {Array<{front: File, back: File|null}>} items one card each: a front, and its back if it has one */
+async function startBatch(items) {
   app.view = 'scan';
-  app.progress = { total: files.length, startedAt: Date.now(), ocrReady: false };
+  app.progress = { total: items.length, startedAt: Date.now(), ocrReady: false };
   render();
 
   await app.ocr.init();
@@ -300,7 +452,8 @@ async function startBatch(files) {
     maxAttempts: 3,
     worker: async (job) => {
       const card = await processImage({
-        file: job.payload.file,
+        file: job.payload.front,
+        backFile: job.payload.back,
         projectId: app.project.id,
         provider: app.provider,
         ocr: app.ocr,
@@ -318,7 +471,7 @@ async function startBatch(files) {
     if (app.view === 'scan') { app.view = 'cards'; await loadCards(); render(); }
   });
 
-  files.forEach((file, i) => app.queue.add(`${Date.now()}-${i}`, { file }));
+  items.forEach((item, i) => app.queue.add(`${Date.now()}-${i}`, item));
   app.queue.run();
 }
 
@@ -725,6 +878,14 @@ function viewReview() {
         h('figcaption', {}, 'Our match'))
     : null;
 
+  // The back, for a card scanned as front and back: the reader took some of its values from it.
+  const back = card.images.back
+    ? h('figure', { style: { margin: '12px 0 0' } },
+        h('img', { class: 'big', alt: 'The back of the card you uploaded' }),
+        h('figcaption', { class: 'tiny muted', style: { textAlign: 'center', marginTop: '4px' } }, 'Back'))
+    : null;
+  if (back) app.urls.urlFor(card.images.back).then((u) => { if (u) back.querySelector('img').src = u; });
+
   return h('div', {},
     h('div', { class: 'row', style: { marginBottom: '14px' } },
       h('h2', {}, `Review ${idx + 1} of ${list.length}`),
@@ -739,6 +900,7 @@ function viewReview() {
               h('figure', { style: { margin: 0 } }, front, h('figcaption', {}, 'Your photo')),
               ref)
           : front,
+        back,
 
         card.errors.length
           ? h('div', { class: 'notice warn', style: { marginTop: '12px' } },
@@ -882,7 +1044,7 @@ function textsFound(card) {
     h('p', { class: 'tiny muted', style: { margin: '8px 0' } }, 'Biggest lettering first. Say what a line is and it goes into that field.'),
     h('div', { class: 'fieldlist' },
       ...texts.map((t) => h('div', { class: 'textrow' },
-        h('span', { class: 't' }, t.text),
+        h('span', { class: 't' }, t.text, t.side ? h('span', { class: 'side' }, t.side) : null),
         h('span', { class: 'tiny muted', title: 'How sure the reading was' }, `${Math.round(t.confidence * 100)}%`),
         h('select', {
           class: 'field', style: { width: 'auto' }, 'aria-label': `What is “${t.text}”?`,
