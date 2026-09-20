@@ -46,6 +46,14 @@ The pure modules carry the tests, because they carry the risk:
   (`DE'ANDRE`, `TANAKA-REYES`), never letting a tidier-looking reading replace a
   better one, and pulling manufacturer, product, league, finish, year, number and
   print run out of the lines that say them.
+- **Two sides** (`pairing.test.mjs`, `sides.test.mjs`, `twosides.test.mjs`) —
+  pairing by file name (English, German, French; a name that says both sides says
+  neither; a back with no front kept and marked) and by order; that a name read on
+  both sides is agreed and one read on a single side is not; that an unreadable
+  front lets the back's name through; that every value records which side it was
+  read from; that a number found only by its position is an inference, capped,
+  flagged and never made when it is ambiguous, a year, small or low on the card;
+  and that the back of a matched card only fills gaps.
 - **The card database** — with a fake `fetch` shaped like the real API: the two
   lookup routes, the year check that stops a misread set size landing on the
   wrong printing, filters dropped in turn, and that a failing database throws
@@ -65,7 +73,15 @@ third party's uptime. It also checks the number-reading retry: corners are read
 once when a valid number comes out, and again inverted only when none does, and
 that a card no database knows keeps the name, maker and year printed on it (each
 with the words it came from) instead of the junk the Pokémon strips read there,
-while a number and a set nobody printed stay empty.
+while a number and a set nobody printed stay empty. A two-photo card goes through
+the whole pipeline with the front unreadable and the back printing the name, and
+the test checks both photos are stored, the name is credited to the back, and each
+value says which side it came from. The upload screen is driven for real: choosing
+front and back, photos added out of order pairing by name, swap, remove, pairing by
+order, the choice surviving a reload.
+
+The photo tool takes the pairs too: `node tools/scan-photos.mjs --pairs` reads
+files named `x-front.jpg` and `x-back.jpg` as one card, the way the app pairs them.
 
 ### Scan accuracy — `tools/accuracy.mjs`
 

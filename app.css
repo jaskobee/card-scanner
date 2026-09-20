@@ -113,6 +113,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 main { flex: 1; padding: 24px 16px 64px; }
 .wrap { max-width: 1160px; margin: 0 auto; }
 .narrow { max-width: 720px; margin: 0 auto; }
+.wide { max-width: 960px; margin: 0 auto; }
 
 /* --- controls ------------------------------------------------------------ */
 
@@ -341,3 +342,48 @@ kbd {
 .textrow { display: flex; gap: 10px; align-items: center; padding: 7px 12px; border-top: 1px solid var(--border); }
 .textrow:first-child { border-top: 0; }
 .textrow .t { flex: 1; font-family: var(--mono); font-size: .85rem; overflow-wrap: anywhere; }
+
+/* --- what you are uploading: one photo per card, or front and back --------- */
+
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.mode {
+  position: relative; display: grid; gap: 3px; padding: 12px 14px; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.mode:hover { border-color: var(--border-strong); }
+.mode.on { border-color: var(--accent); background: var(--accent-soft); }
+.mode input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.mode:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.mode-title { font-weight: 600; }
+.mode-hint { font-size: .85rem; color: var(--text-2); }
+
+/* --- pairs waiting to be scanned ------------------------------------------ */
+
+.pairs .pairlist { display: grid; gap: 10px; margin-top: 14px; }
+.pair {
+  display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: center;
+  padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+}
+.pair-actions { display: grid; gap: 6px; }
+.slot { margin: 0; display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: center; min-width: 0; }
+.slot-photo {
+  padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface); cursor: pointer; aspect-ratio: 5 / 7; overflow: hidden; display: block;
+}
+.slot-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.slot figcaption { display: grid; gap: 2px; min-width: 0; font-size: .85rem; }
+.slot-name { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot.empty {
+  grid-template-columns: 1fr; place-items: center; min-height: 90px; cursor: pointer;
+  border: 1.5px dashed var(--border-strong); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-2); font: inherit;
+}
+.slot.empty:hover { border-color: var(--accent); color: var(--accent); }
+.textrow .side { margin-left: 8px; font-family: inherit; font-size: .72rem; color: var(--text-2); border: 1px solid var(--border); border-radius: 99px; padding: 0 7px; }
+
+@media (max-width: 640px) {
+  .modes { grid-template-columns: 1fr; }
+  .pair { grid-template-columns: 1fr 1fr; }
+  .pair-actions { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+  .slot { grid-template-columns: 48px 1fr; }
+}

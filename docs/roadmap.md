@@ -22,7 +22,7 @@ before infrastructure gets built.
 - [x] Job queue with retry, backoff, circuit breaker, resume
 - [x] Static deployment, no build step
 - [ ] **A labelled set of real photos and a measured accuracy figure** (a synthetic measurement exists: see `testing.md`)
-- [ ] Front/back image pairing (modelled, not wired). **Next after real photos:** sports and entertainment cards keep their number, set and year on the back
+- [x] Front/back image pairing: choose what you are uploading; the pairs are checked before scanning; both sides are read
 
 ## Phase 2
 

@@ -278,6 +278,122 @@ log(unknown.read === 'text', 'the card is marked as read from its text, for the 
 log(unknown.texts.some((t) => /topps/i.test(t)), 'everything read is kept so a person can assign it by hand', unknown.texts.join(' | '));
 log(unknown.seen.single >= 1, 'the likeliest name is read again on its own line', String(unknown.seen.single));
 
+// --- a card with a front and a back -------------------------------------------------
+// The front of a wrestling card is stencil lettering the reader cannot use ("GERI"); its
+// back prints the name in plain type, with the maker and year in the small print. The stub
+// gives the front nothing and the back a name and a legal line, and switches to the back
+// the moment the pipeline opens the back photo, so this tests the wiring: that both photos
+// are stored, that the name is taken from the back and says so, and that a value read from
+// one side is marked with that side.
+
+const twoSides = await page.evaluate(async () => {
+  const { processImage } = await import('/src/pipeline.js');
+  const store = await import('/src/storage.js');
+
+  const photo = async (shade) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 600; canvas.height = 840;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#222'; ctx.fillRect(0, 0, 600, 840);
+    ctx.fillStyle = shade; ctx.fillRect(40, 40, 520, 760);
+    return new Promise((r) => canvas.toBlob(r, 'image/png'));
+  };
+  const front = new File([await photo('#f4f0e4')], 'ellis-front.png', { type: 'image/png' });
+  const back = new File([await photo('#e8eef4')], 'ellis-back.png', { type: 'image/png' });
+
+  let side = 'front';
+  const realBitmap = window.createImageBitmap.bind(window);
+  window.createImageBitmap = (src, ...rest) => { if (src === back) side = 'back'; return realBitmap(src, ...rest); };
+
+  const word = (text, x0, y0, x1, y1) => ({ text, confidence: 0.92, bbox: { x0, y0, x1, y1 } });
+  const nothing = { text: '', confidence: 0.3, words: [], lines: [], symbols: [] };
+  const ocr = {
+    recognise: async (_img, { psm } = {}) => {
+      if (side === 'front') return psm === 6 ? { ...nothing, text: 'GERI', confidence: 0.5 } : nothing;
+      if (psm === 7) return { ...nothing, text: 'JORDAN ELLIS', confidence: 0.94 };
+      return {
+        text: 'JORDAN ELLIS\n© 2022 THE TOPPS COMPANY, INC.', confidence: 0.9,
+        words: [
+          word('JORDAN', 60, 40, 330, 140), word('ELLIS', 360, 40, 560, 140),
+          word('©', 60, 250, 80, 275), word('2022', 90, 250, 150, 275), word('THE', 160, 250, 200, 275),
+          word('TOPPS', 210, 250, 290, 275), word('COMPANY,', 300, 250, 420, 275), word('INC.', 430, 250, 480, 275),
+        ],
+        lines: [], symbols: [],
+      };
+    },
+  };
+  const provider = { id: 'stub', knownTotals: async () => new Set(), search: async () => [] };
+
+  let card;
+  try { card = await processImage({ file: front, backFile: back, projectId: 'test', provider, ocr }); }
+  finally { window.createImageBitmap = realBitmap; }
+
+  const f = card.fields;
+  return {
+    name: f.name.value, nameEvidence: f.name.evidence,
+    maker: f.manufacturer.value, makerEvidence: f.manufacturer.evidence,
+    year: f.year.value, yearEvidence: f.year.evidence,
+    backKey: card.images.back, frontKey: card.images.front, sides: card.meta.sides, state: card.state,
+    backStored: Boolean(await store.getBlob(card.images.back)), frontStored: Boolean(await store.getBlob(card.images.front)),
+    textSides: [...new Set((card.meta.texts ?? []).map((t) => t.side))].sort(),
+  };
+});
+
+log(/^jordan ellis$/i.test(twoSides.name ?? ''), 'the name is taken from the side that printed it', String(twoSides.name));
+log(/^back: /.test(twoSides.nameEvidence ?? ''), 'and the card says it came from the back', twoSides.nameEvidence);
+log(twoSides.maker === 'Topps' && /^back: /.test(twoSides.makerEvidence ?? ''), 'the maker from the back\'s small print is marked as read from the back', twoSides.makerEvidence);
+log(twoSides.year === 2022 && /^back: /.test(twoSides.yearEvidence ?? ''), 'so is the year', twoSides.yearEvidence);
+log(twoSides.backKey === `${twoSides.frontKey.split(':')[0]}:back`, 'the back photo is stored against the same card', String(twoSides.backKey));
+log(twoSides.backStored && twoSides.frontStored, 'both photos are in storage');
+log(twoSides.sides?.join() === 'front,back', 'the card records that it has two sides', String(twoSides.sides));
+log(twoSides.textSides.join() === 'back', 'every line read is marked with its side', twoSides.textSides.join());
+log(twoSides.state === 'NEEDS_REVIEW', 'and it still goes to review, where a person confirms it', twoSides.state);
+
+// --- choosing what to upload, and checking the pairs before anything is scanned ------------
+
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const photoFile = (name) => ({ name, mimeType: 'image/png', buffer: PNG });
+
+await page.goto(URL_BASE, { waitUntil: 'networkidle' });
+await page.getByRole('tab', { name: 'Upload' }).click();
+log(await page.getByRole('radio', { name: /One photo per card/ }).isChecked(), 'uploading starts as one photo per card');
+log(await page.locator('.dropzone').count() === 1, 'with the drop area ready');
+
+await page.getByRole('radio', { name: /Front and back/ }).check();
+log(await page.getByText(/where the number and year are on the back/).count() > 0, 'choosing front and back says what it is for');
+
+// Added out of order: the names, not the order, say which photo goes with which.
+await page.setInputFiles('#filepicker', ['bray-back.png', 'ciampa-front.png', 'bray-front.png', 'ciampa-back.png'].map(photoFile));
+await page.waitForSelector('.pair');
+log(await page.locator('.pair').count() === 2, 'four photos become two cards to check');
+const firstPair = await page.locator('.pair').nth(0).innerText();
+log(/ciampa-front\.png/.test(firstPair) && /ciampa-back\.png/.test(firstPair), 'the fronts and backs are paired by their names', firstPair.replace(/\s+/g, ' '));
+log(await page.getByText(/paired by their file names/).count() > 0, 'and it says how they were paired');
+log(await page.getByRole('button', { name: 'Scan 2 cards' }).isEnabled(), 'scanning waits for a button, not for the photos');
+
+await page.locator('.pair').nth(0).getByRole('button', { name: 'Swap' }).click();
+const swapped = await page.locator('.pair').nth(0).innerText();
+log(/Front\s*\n?\s*ciampa-back/.test(swapped), 'swapping puts the back photo in the front slot', swapped.replace(/\s+/g, ' '));
+await page.locator('.pair').nth(1).getByRole('button', { name: /Remove this card/ }).click();
+log(await page.locator('.pair').count() === 1, 'a card can be removed before it is scanned');
+log(await page.getByRole('button', { name: 'Scan 1 card' }).count() === 1, 'and the button says how many will be scanned');
+
+await page.getByRole('button', { name: 'Clear all' }).click();
+log(await page.locator('.dropzone').count() === 1, 'clearing goes back to the drop area');
+
+// Photos with no side in their names are paired in the order they were added.
+await page.setInputFiles('#filepicker', ['IMG_1.png', 'IMG_2.png', 'IMG_3.png'].map(photoFile));
+await page.waitForSelector('.pair');
+log(await page.locator('.pair').count() === 2, 'three photos in order are one pair and a front with no back');
+log(await page.getByText(/paired in the order you added them/).count() > 0, 'and it says they were paired by order');
+await page.getByRole('button', { name: 'Clear all' }).click();
+
+// The choice is remembered.
+await page.reload({ waitUntil: 'networkidle' });
+await page.getByRole('tab', { name: 'Upload' }).click();
+log(await page.getByRole('radio', { name: /Front and back/ }).isChecked(), 'the choice of front and back survives a reload');
+await page.getByRole('radio', { name: /One photo per card/ }).check();
+
 // --- selecting and deleting cards, against real IndexedDB -----------------------
 // Deleting must remove the photos too: they are the full-resolution originals,
 // and leaving them behind would fill the browser's storage invisibly.

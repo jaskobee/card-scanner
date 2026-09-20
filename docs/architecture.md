@@ -51,6 +51,8 @@ boundaries below are already where a framework would slot in.
 | `ocr.js` | Tesseract worker pool, rendering the card, cropping strips | imageproc, regions |
 | `textlines.js` | words → lines → likeliest name; brand, league, year and print run from the text | — |
 | `generic.js` | reads a whole card for text when no database vouches for it | ocr, textlines |
+| `pairing.js` | turns a pile of photos into front-and-back pairs, by file name or by order | — |
+| `sides.js` | decides what a front and a back say together: agrees names, merges evidence | — |
 | `pipeline.js` | orchestrates one image into one card | most of the above |
 | `providers/*` | one card database each | queue, normalize |
 | `ui/*` | views, table, review, export | everything |
@@ -165,9 +167,43 @@ capped at 0.7 (`CLAUDE.md` §2.1). A print run such as `37/99` is stored as
 (`meta.texts`) so the review screen can offer "Use as…" for any line, because a
 person can always see what the reader could not choose.
 
-The card number, the set and the year of most sports and entertainment cards
-are printed on the **back**. The app reads the front only, so those stay empty
-and flagged, rather than guessed, until the back can be scanned too.
+## Cards with two sides
+
+Wrestling, sports and entertainment cards split what they say: the front has the
+picture and often lettering nothing can read (a stencil name on a textured
+plate), the back has the card number, the year, the maker and the name in plain
+type. So the Upload screen asks what is being uploaded, and *Front and back*
+turns a pile of photos into cards of two photos each.
+
+1. **Pair** (`pairing.js`). If every file name says its side (`front`, `back`,
+   `vorne`, `hinten`, `recto`, `verso`), a front goes with the back that has the
+   same name apart from that word; otherwise the first photo goes with the
+   second, the third with the fourth. Neither is trusted silently: the pairs are
+   shown with thumbnails before anything is scanned, and any can be swapped,
+   replaced or removed. A back with no front is skipped and said so.
+2. **Read each side on its own** with the whole-card reader. The front also gets
+   the database lookup; a back is never looked up, since no database matches a
+   back, and it is not turned around if it is upside down, because a plain back
+   has no name to recognise the right way up by.
+3. **Decide together** (`sides.js`). A name read on both sides, even with a
+   letter misread ("BRAY WYATT" and "BRAY WATT"), is *agreed*: it takes the surer
+   spelling, gains confidence and ranks above anything read on one side. If one
+   side is unreadable, the other's name is used and the card says which side it
+   came from. Other evidence goes to whichever side read it best, and a value
+   printed as such beats one inferred from its position.
+4. **Say where it came from.** Every value's evidence starts with `front:` or
+   `back:`, and the name says both when both agree.
+
+One inference is made on backs, and it names its rule: a lone number, printed
+large near the top, read sure, with no other number of that size, is recorded as
+the card number with source `inferred`, at most 60% confidence, and flagged so a
+person confirms it. It is the number as printed; only its position says it is the
+card's number rather than a statistic.
+
+A card a database matched keeps its match: its back only fills what the front
+left empty and never renames it. And a value the corner strips read at under half
+confidence ("53" at 0% on a card whose number was on the back) does not stand in
+the way of a number read from the whole card, or stay if there is none.
 
 ## The provider seam
 

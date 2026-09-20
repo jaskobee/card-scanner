@@ -66,6 +66,7 @@ image → quality → find card → straighten → read name & number → card d
 | Ranking | browser | weighted signal agreement, with a margin check |
 | Second opinion | browser | a reading that is not confident is repeated with a different framing before you are asked |
 | Everything else | browser | a card no database knows (sports, wrestling, film) is read for text wherever it is printed: name, maker, product, year, league, print run |
+| Front and back | browser | choose *Front and back* when uploading and each card's two photos are read together: the name is taken from whichever side printed it best, and the number, year and maker from the back |
 
 Nothing is populated without evidence. Every identification value carries where
 it came from, how confident we are, and the exact text it was read from:
@@ -146,9 +147,15 @@ Worth knowing before you scan 500 cards:
 - **Drafts, not live listings.** A CSV cannot carry photos and yours stay on your
   device, so eBay listings are created as drafts and you add the photos there.
 - **Excel templates are not read yet.** Download eBay's template as `.csv`.
-- **Front only.** Back-image support is modelled but not wired up. Sports and
-  entertainment cards print the card number, set and often the year on the
-  back, so those fields stay empty on them until the back can be scanned.
+- **A back is only worth scanning when it says something.** Choose *Front and
+  back* on the Upload screen for wrestling, sports and entertainment cards, which
+  split the name, number, year and maker between the sides. Pokémon and most
+  other card games print everything on the front, and a back adds nothing there.
+  The back is read as text only; no database matches a back. Photos are paired
+  by file name (`front`, `back`, `vorne`, `hinten`) or in the order you add
+  them, and you check the pairs before anything is scanned.
+- **Small print on a dark back is often unreadable.** The year is the field
+  most often left empty; it is flagged, never guessed.
 - **No pricing.** Identification and valuation are deliberately separate
   systems; pricing is not implemented rather than implemented badly.
 - **Condition is yours.** The app will not guess condition from a photo, ever.

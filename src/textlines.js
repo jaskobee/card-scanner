@@ -303,16 +303,20 @@ export function rankNames(lines, cardHeight) {
  * manufacturer inside a sentence is not enough: the line has to be short and made
  * of brand words, or say "©", as a logo or a legal line does.
  */
-export function readEvidence(lines) {
+export function readEvidence(lines, { back = false, cardHeight = 0 } = {}) {
   const found = {};
   const note = (key, value, raw, confidence) => {
     if (!found[key] || found[key].confidence < confidence) found[key] = { value, raw, confidence };
   };
 
   for (const l of lines) {
+    // A line the recogniser was less than 40 percent sure of is not evidence of anything:
+    // "#53" read at 0 percent from the front of a card whose number was on the back.
+    if (l.confidence < 0.4) continue;
     const p = plain(l.text);
     const words = p.split(' ').filter(Boolean);
-    const legal = /©|\(c\)|copyright/.test(p);
+    // Legal small print says so in words as well as with a ©, which the recogniser often drops.
+    const legal = /©|\(c\)|copyright|all rights reserved|registered trademark/.test(p);
     const brandish = words.length <= 6 || legal;
 
     if (brandish) {
@@ -336,6 +340,23 @@ export function readEvidence(lines) {
     // not the card's own number. Recorded as what it is.
     const serial = /(?:^|\s)(\d{1,4})\s*\/\s*(\d{1,4})(?:\s|$)/.exec(p);
     if (serial && !legal && Number(serial[1]) <= Number(serial[2]) && Number(serial[2]) >= 2) note('serial', `${serial[1]}/${serial[2]}`, l.text, l.confidence);
+  }
+
+  // The back of a wrestling, sports or entertainment card prints its number alone and large
+  // near the top ("126" over the name plate). That is the number as printed, but only its
+  // position says it is the card's number and not a statistic, so it is recorded as an
+  // inference that names its rule, and it is only made when nothing is ambiguous: one line,
+  // clearly the biggest, read sure, not a year.
+  if (back && cardHeight && !found.number) {
+    const isYear = (t) => /^(19[3-9]\d|20[0-4]\d)$/.test(t);
+    const lone = lines
+      .filter((l) => /^\d{1,4}$/.test(l.text.trim()) && !isYear(l.text.trim()) && l.confidence >= 0.85
+        && l.height >= 0.015 * cardHeight && (l.y0 + l.y1) / 2 <= 0.3 * cardHeight)
+      .sort((a, b) => b.height - a.height);
+    if (lone.length && (lone.length === 1 || lone[1].height < 0.8 * lone[0].height)) {
+      const n = lone[0];
+      found.number = { value: n.text.trim(), raw: n.text.trim(), confidence: n.confidence, inferred: 'the only large number near the top of the back' };
+    }
   }
   return found;
 }
