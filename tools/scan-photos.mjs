@@ -3,7 +3,11 @@
 //   node tools/scan-photos.mjs                       # every photo in test-data/local/
 //   node tools/scan-photos.mjs --dir ~/Pictures/cards
 //   node tools/scan-photos.mjs --save /tmp/overlays  # also draw what it found on each card
+//   node tools/scan-photos.mjs --pairs               # read front and back photos together
 //   node tools/scan-photos.mjs --base http://localhost:8080   # use an app that is already running
+//
+// With --pairs, photos are paired the way the app pairs them: by name when every file says
+// its side (bray-front.jpg, bray-back.jpg), otherwise in the order they sort.
 //
 // It starts the app itself for the length of the run unless you point it at one.
 //
@@ -21,12 +25,14 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pairPhotos } from '../src/pairing.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
 let base = arg('base', '');
 const dir = resolve(arg('dir', join(ROOT, 'test-data/local')));
 const saveDir = arg('save', '');
+const pairs = process.argv.includes('--pairs');
 
 const KINDS = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
 const photos = existsSync(dir) ? readdirSync(dir).filter((f) => KINDS[extname(f).toLowerCase()]).sort() : [];
@@ -74,9 +80,16 @@ await page.evaluate(async () => {
 
 if (saveDir) mkdirSync(saveDir, { recursive: true });
 
-for (const name of photos) {
+// One card each: a single photo, or with --pairs a front and its back.
+const cards = pairs
+  ? pairPhotos(photos.map((name) => ({ name }))).pairs.map((p) => ({ name: p.front?.name ?? p.back.name, back: p.front ? p.back?.name ?? null : null, only: !p.front }))
+  : photos.map((name) => ({ name, back: null }));
+
+for (const { name, back, only } of cards) {
+  if (only) { console.log(`\n=== ${name}: a back with no front, skipped`); continue; }
   const bytes = readFileSync(join(dir, name)).toString('base64');
-  const r = await page.evaluate(async ({ name, bytes, type, draw }) => {
+  const backBytes = back ? readFileSync(join(dir, back)).toString('base64') : null;
+  const r = await page.evaluate(async ({ name, bytes, backBytes, type, draw }) => {
     const { processImage } = await import('/src/pipeline.js');
     const { PokemonTcgdexProvider } = await import('/src/providers/pokemon-tcgdex.js');
     const { downscale, renderCard } = await import('/src/ocr.js');
@@ -85,10 +98,11 @@ for (const name of photos) {
 
     const raw = Uint8Array.from(atob(bytes), (c) => c.charCodeAt(0));
     const file = new File([raw], name, { type });
+    const backFile = backBytes ? new File([Uint8Array.from(atob(backBytes), (c) => c.charCodeAt(0))], 'back', { type }) : null;
     const pool = globalThis.__pool;
     const t0 = performance.now();
     let card = null, error = null;
-    try { card = await processImage({ file, projectId: 'photos', provider: new PokemonTcgdexProvider({ language: 'en' }), ocr: pool }); }
+    try { card = await processImage({ file, backFile, projectId: 'photos', provider: new PokemonTcgdexProvider({ language: 'en' }), ocr: pool }); }
     catch (e) { error = String(e.message ?? e); }
 
     let overlay = null, lines = [];
@@ -124,9 +138,9 @@ for (const name of photos) {
       meta: card ? { framing: card.meta.framing, read: card.meta.read, names: card.meta.names, texts: card.meta.texts } : {},
       overlay,
     };
-  }, { name, bytes, type: KINDS[extname(name).toLowerCase()], draw: Boolean(saveDir) });
+  }, { name, bytes, backBytes, type: KINDS[extname(name).toLowerCase()], draw: Boolean(saveDir) });
 
-  console.log(`\n=== ${name}  (${(r.ms / 1000).toFixed(1)}s)`);
+  console.log(`\n=== ${name}${back ? ` + ${back}` : ''}  (${(r.ms / 1000).toFixed(1)}s)`);
   if (r.error) { console.log(`  FAILED: ${r.error}`); continue; }
   const pct = (n) => `${Math.round(n * 100)}%`;
   console.log(`  state ${r.state}, confidence ${pct(r.confidence ?? 0)}, framing ${r.meta.framing ?? '-'}${r.meta.read ? `, read as ${r.meta.read}` : ''}`);
