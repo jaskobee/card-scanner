@@ -389,3 +389,59 @@ test('a name is never joined to the team name under it', () => {
   assert.ok(ranked.every((r) => r.text !== 'JORDAN ELLIS SUNSET KINGS'));
   assert.ok(ranked.some((r) => r.text === 'JORDAN ELLIS'));
 });
+
+// --- the back of a card ---------------------------------------------------------------------
+
+test('a lone large number near the top of a back is the card number, recorded as an inference', () => {
+  // Real: the back of a Topps Chrome wrestling card printed "126" over its name plate, read 97% sure.
+  const lines = groupIntoLines(dedupeWords([word('126', 97, 2.7, 11, 480, 60), word('BRAY WYATT', 90, 3.5, 20, 450)]));
+  const found = readEvidence(lines, { back: true, cardHeight: H });
+  assert.equal(found.number.value, '126');
+  assert.match(found.number.inferred, /top of the back/);
+});
+
+test('the same number on a front is not taken for the card number', () => {
+  const lines = groupIntoLines(dedupeWords([word('126', 97, 2.7, 11, 480, 60)]));
+  assert.equal(readEvidence(lines, { cardHeight: H }).number, undefined);
+});
+
+test('a lone number is not a card number when it is a year, small, low, or one of two like it', () => {
+  const near = (text, conf, h, y) => readEvidence(groupIntoLines(dedupeWords([word(text, conf, h, y, 480, 60)])), { back: true, cardHeight: H }).number;
+  assert.equal(near('2025', 97, 2.7, 11), undefined, 'a year');
+  assert.equal(near('126', 97, 0.9, 11), undefined, 'too small to be the number');
+  assert.equal(near('126', 97, 2.7, 60), undefined, 'not near the top');
+  assert.equal(near('126', 60, 2.7, 11), undefined, 'not read sure enough');
+  const two = groupIntoLines(dedupeWords([word('126', 97, 2.7, 11, 300, 60), word('88', 97, 2.6, 12, 700, 60)]));
+  assert.equal(readEvidence(two, { back: true, cardHeight: H }).number, undefined, 'two candidates of one size is ambiguous');
+});
+
+test('a number printed with # is still a printed number, not an inference', () => {
+  const lines = groupIntoLines(dedupeWords([word('#53', 90, 2, 12, 480, 60)]));
+  const found = readEvidence(lines, { back: true, cardHeight: H });
+  assert.equal(found.number.value, '53');
+  assert.equal(found.number.inferred, undefined);
+});
+
+test('a line the recogniser was under 40% sure of is not evidence of a number, year or maker', () => {
+  // Real: "#53" at 0% on the front of a card whose number was printed on its back.
+  const junk = groupIntoLines(dedupeWords([word('#53', 1, 2, 12, 480, 60), word('© 2022 TOPPS', 30, 1.5, 96, 100, 300)]));
+  assert.deepEqual(readEvidence(junk, { back: true, cardHeight: H }), {});
+});
+
+test('legal print is recognised by its words when the copyright mark was dropped', () => {
+  // Real, from the back of a Topps Chrome card: no ©, but it says who owns what.
+  const line = (text, conf) => ({ text, confidence: conf, height: 30, y0: 1300, y1: 1330 });
+  const found = readEvidence([
+    line('Reserved. Topps and Topps Chrome are registered trademarks of The Topps Company Inc.', 0.96),
+    line('2025 WWE. All Rights Reserved. 6 0 2025 The Topps Company Inc. All Rights', 0.95),
+  ]);
+  assert.equal(found.manufacturer.value, 'Topps');
+  assert.equal(found.product.value, 'Chrome');
+  assert.equal(found.year.value, 2025);
+});
+
+test('a long sentence that merely mentions a brand is still not legal print', () => {
+  const line = (text) => ({ text, confidence: 0.95, height: 20, y0: 800, y1: 820 });
+  const found = readEvidence([line('He signed with Topps after a long career that took him from the indies to the main event of the biggest shows')]);
+  assert.equal(found.manufacturer, undefined);
+});

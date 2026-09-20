@@ -113,9 +113,11 @@ export async function findLines(card, ocr, { fine = false } = {}) {
  * Everything readable on the card, and the most likely names.
  * @param {OffscreenCanvas} card the upright card
  * @param {{recognise: Function}} ocr
+ * @param {{side?: 'front'|'back'}} [options] the back of a card is read for what a back prints:
+ *   its number, alone and large near the top
  * @returns {{lines: Array, names: Array, evidence: object, texts: Array}}
  */
-export async function readAnyCard(card, ocr) {
+export async function readAnyCard(card, ocr, { side = 'front' } = {}) {
   const H = card.height;
   let words = await findLines(card, ocr);
   // Nothing that could be a name? Look again, more finely, before giving up.
@@ -147,12 +149,12 @@ export async function readAnyCard(card, ocr) {
   return {
     lines: sharper,
     names,
-    evidence: readEvidence(lines),
+    evidence: readEvidence(lines, { back: side === 'back', cardHeight: H }),
     // Every line worth showing, biggest first, for the user to assign by hand. The lines
     // that became names show their corrected reading; the rest show what was printed.
     texts: sharper
       .map((l, i) => (named.has(l) ? l : lines[i]))
-      .filter((l) => /[A-Za-z0-9]{2,}/.test(l.text) && l.confidence >= 0.4)
+      .filter((l) => /[A-Za-z0-9]{3,}/.test(l.text) && l.confidence >= 0.55)
       .sort((a, b) => b.height - a.height)
       .slice(0, 24)
       .map((l) => ({ text: l.text, confidence: Math.round(l.confidence * 100) / 100, size: Math.round((l.height / H) * 1000) / 1000 })),

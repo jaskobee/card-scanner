@@ -11,6 +11,7 @@ import {
 import { rankCandidates } from './match.js';
 import { extracted, newCard, STATE, band, EMPTY } from './model.js';
 import { readAnyCard } from './generic.js';
+import { combineSides } from './sides.js';
 import { hashImageData } from './dupes.js';
 import * as store from './storage.js';
 
@@ -143,19 +144,34 @@ async function interpret({ canvas, ocr, provider, isKnownTotal }) {
  * lettered card is upside down, because it is the one that knows what a name looks like).
  */
 const GOOD_NAME = 0.6;
-async function readAnyFraming(bitmap, placement, ocr, signal) {
+async function readAnyFraming(bitmap, placement, ocr, signal, { side = 'front' } = {}) {
+  // A back that is not the right way up is rare and a plain back has no name to tell it by,
+  // so turning it around would only cost a third reading of a card that may have nothing to say.
   const framings = placement
-    ? [['located', placement], ['whole-frame', null], ['turned-around', { ...placement, angle: placement.angle + Math.PI }]]
+    ? [['located', placement], ['whole-frame', null], ...(side === 'back' ? [] : [['turned-around', { ...placement, angle: placement.angle + Math.PI }]])]
     : [['whole-frame', null]];
   let chosen = null;
   for (const [framing, p] of framings) {
     if (signal?.aborted) break;
-    const g = await readAnyCard(renderCard(bitmap, p), ocr);
+    const g = await readAnyCard(renderCard(bitmap, p), ocr, { side });
     const score = g.names[0]?.score ?? 0;
     if (!chosen || score > chosen.score) chosen = { ...g, framing, score };
     if (score >= GOOD_NAME) break;
   }
   return chosen;
+}
+
+/** The back of a card, read as text. Nothing on it is looked up: no database matches a back. */
+async function readBack(file, ocr, signal) {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const small = downscale(bitmap);
+    const located = locateCard(small.imageData);
+    const placement = located ? scalePlacement(located, bitmap.width / small.width) : null;
+    return await readAnyFraming(bitmap, placement, ocr, signal, { side: 'back' });
+  } finally {
+    bitmap.close();
+  }
 }
 
 const isConfident = (a) => band(a.ranked.confidence, a.ranked.margin).key === 'HIGH';
@@ -167,11 +183,12 @@ function isBetter(a, b) {
 }
 
 /**
- * Process one image into a card record.
+ * Process one card into a card record: one photo, or the front and back photos
+ * of a card that says half of what it says on each side.
  * Throws only on unrecoverable errors; a poor-quality image still produces a
  * card, flagged, because the user may know better than the detector.
  */
-export async function processImage({ file, projectId, provider, ocr, signal }) {
+export async function processImage({ file, backFile = null, projectId, provider, ocr, signal }) {
   const startedAt = performance.now();
   const card = newCard({ projectId });
 
@@ -184,6 +201,7 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   const bitmap = await createImageBitmap(file);
   let best = null;
   let general = null;
+  let backRead = null;
   let quality, hash;
   try {
     const small = downscale(bitmap);
@@ -197,6 +215,11 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
     await store.putBlob(`${card.id}:front`, file);
     await store.putBlob(`${card.id}:thumb`, thumb);
     card.images = { front: `${card.id}:front`, back: null, thumb: `${card.id}:thumb` };
+    if (backFile) {
+      await store.putBlob(`${card.id}:back`, backFile);
+      card.images.back = `${card.id}:back`;
+      card.meta.sides = ['front', 'back'];
+    }
     card.meta.hash = hash;
     card.quality = quality;
 
@@ -231,11 +254,21 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
     if ((!best.ranked.best || best.ranked.confidence < 0.5) && !signal?.aborted) {
       general = await readAnyFraming(bitmap, placement, ocr, signal);
     }
+
+    // The back. Many cards keep their number, year and maker there, and the name in plain
+    // type, when the front's lettering is a stencil on a textured plate that nothing reads.
+    if (backFile && !signal?.aborted) backRead = await readBack(backFile, ocr, signal);
   } finally {
     bitmap.close();
   }
 
   if (signal?.aborted) throw abortError();
+
+  // Two sides read as text say more together than apart. A front a database matched keeps its
+  // match, and its back only fills in what the front left empty.
+  const fillFromBack = Boolean(backRead && !general);
+  if (general && backRead) general = combineSides(general, backRead);
+  const backOnly = fillFromBack ? combineSides(null, backRead) : null;
 
   const { reading, signals, query, ranked } = best;
   card.meta.ocrConfidence = reading.confidence;
@@ -279,6 +312,10 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
   if (signals.year) card.fields.year = extracted(signals.year.value, 'ocr', 0.85, signals.year.raw);
 
   if (general) applyGeneral(card, general);
+  if (backOnly) {
+    applyGeneral(card, backOnly, { fillOnly: true });
+    card.meta.texts = backOnly.texts;
+  }
 
   if (ranked.best) {
     const b = ranked.best;
@@ -320,30 +357,58 @@ export async function processImage({ file, projectId, provider, ocr, signal }) {
 
 /**
  * Record what the general reader found. Each value keeps the exact text it was read
- * from. Nothing overwrites what the card already has, with three exceptions that are
- * about *where* the strips looked: the name, because the strip reader takes it from
- * where Pokémon put it and on any other card that is usually junk from the edge; the
- * year, because a strip's guess at digits is weaker than a line that says ©; and a
- * variant that is really a product line.
+ * from, and the side of the card it was read from when there are two. Nothing overwrites
+ * what the card already has, with three exceptions that are about *where* the strips
+ * looked: the name, because the strip reader takes it from where Pokémon put it and on any
+ * other card that is usually junk from the edge; the year, because a strip's guess at digits
+ * is weaker than a line that says ©; and a variant that is really a product line.
+ *
+ * With `fillOnly`, which is the back of a card a database already matched, nothing is
+ * overwritten at all: the back may add a manufacturer or a year, never change the name.
  */
-function applyGeneral(card, g) {
+export function applyGeneral(card, g, { fillOnly = false } = {}) {
   const has = (f) => Boolean(card.fields[f]?.value);
+  const open = (f) => !fillOnly || !has(f);
   const put = (field, value, confidence, evidence, source = 'ocr') => {
     card.fields[field] = extracted(value, source, clamp(confidence), evidence);
   };
   const e = g.evidence;
+  // Where a value was read from, when a card has two sides to have read it from.
+  const via = (x) => (x.side ? `${x.side}: ${x.raw}` : x.raw);
+  const unsure = [];
 
   const name = g.names[0];
-  if (name) put('name', name.text, name.confidence * 0.85, name.text);
+  if (name && open('name')) {
+    const said = name.sources?.length > 1
+      ? name.sources.map((s) => `${s.side}: “${s.text}”`).join(' + ')
+      : (name.side ? `${name.side}: ${name.text}` : name.text);
+    put('name', name.text, name.confidence * 0.85, said);
+  }
 
-  if (e.manufacturer && !has('manufacturer')) put('manufacturer', e.manufacturer.value, e.manufacturer.confidence * 0.9, e.manufacturer.raw);
-  if (e.product && !has('set')) put('set', e.product.value, e.product.confidence * 0.85, e.product.raw);
-  if (e.year) put('year', e.year.value, e.year.confidence * 0.85, e.year.raw);
-  if (e.number && !has('number')) put('number', e.number.value, e.number.confidence * 0.8, e.number.raw);
+  if (e.manufacturer && !has('manufacturer')) put('manufacturer', e.manufacturer.value, e.manufacturer.confidence * 0.9, via(e.manufacturer));
+  if (e.product && !has('set')) put('set', e.product.value, e.product.confidence * 0.85, via(e.product));
+  if (e.year && open('year')) put('year', e.year.value, e.year.confidence * 0.85, via(e.year));
+
+  // A number the corner strips read below half confidence is a guess at the corner of a card
+  // whose number may be elsewhere ("53" at 0% on a card whose number was on the back). A
+  // blank that a person fills in is better on a listing than a wrong number, so it does not
+  // stand in the way of a number read from the whole card, and does not stay if there is none.
+  const weakNumber = !fillOnly && card.fields.number?.source === 'ocr' && card.fields.number.confidence < 0.5;
+  if (weakNumber && !e.number) card.fields.number = { ...EMPTY };
+  if (e.number && (!has('number') || weakNumber)) {
+    if (e.number.inferred) {
+      // Only its position says this is the card's number, so it is an inference that names
+      // its rule, it never scores as certain, and a person confirms it.
+      put('number', e.number.value, Math.min(0.6, e.number.confidence * 0.7), `${e.number.side ? `${e.number.side}: ` : ''}${e.number.inferred}: “${e.number.raw}”`, 'inferred');
+      unsure.push('number');
+    } else {
+      put('number', e.number.value, e.number.confidence * 0.8, via(e.number));
+    }
+  }
 
   if (e.league) {
     const { league, sport } = e.league.value;
-    put('league', league, e.league.confidence * 0.9, e.league.raw);
+    if (open('league')) put('league', league, e.league.confidence * 0.9, via(e.league));
     // An NBA card is a basketball card. That is a rule, so it is recorded as one, and
     // an inference never scores as certain.
     if (sport && !has('sport')) put('sport', sport, 0.7, `${league} is a ${sport} league`, 'inferred');
@@ -351,16 +416,16 @@ function applyGeneral(card, g) {
 
   // "37/99" on a card is the print run of a numbered parallel, not the card's number.
   if (e.serial) {
-    put('serial', e.serial.value, e.serial.confidence * 0.8, e.serial.raw);
-    if (card.fields.number?.value === e.serial.value) card.fields.number = { ...EMPTY };
+    if (open('serial')) put('serial', e.serial.value, e.serial.confidence * 0.8, via(e.serial));
+    if (!fillOnly && card.fields.number?.value === e.serial.value) card.fields.number = { ...EMPTY };
   }
 
   // Chrome and Prizm are product lines. A parallel is a finish such as a refractor.
-  if (e.finish) put('variant', e.finish.value, e.finish.confidence * 0.8, e.finish.raw);
-  else if (/^(chrome|prizm)$/i.test(card.fields.variant?.value ?? '')) card.fields.variant = { ...EMPTY };
+  if (e.finish && open('variant')) put('variant', e.finish.value, e.finish.confidence * 0.8, via(e.finish));
+  else if (!fillOnly && !e.finish && /^(chrome|prizm)$/i.test(card.fields.variant?.value ?? '')) card.fields.variant = { ...EMPTY };
 
-  const missing = ['name', 'set', 'number', 'year'].filter((f) => !has(f));
-  const unsure = name && name.confidence >= 0.6 ? [] : ['name'];
+  const missing = fillOnly ? [] : ['name', 'set', 'number', 'year'].filter((f) => !has(f));
+  if (!fillOnly && !(name && name.confidence >= 0.6)) unsure.push('name');
   card.flags = [...new Set([...card.flags, ...missing, ...unsure])];
 }
 
